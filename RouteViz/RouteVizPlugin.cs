@@ -25,7 +25,7 @@ namespace RouteViz
     {
         public const string Guid = "motorways.routeviz";
         public const string Name = "RouteViz";
-        public const string Version = "1.0.0";
+        public const string Version = "1.1.0";
 
         private const float LineZ = -6.05f; // cars sit at z = -6.1
         // Same sorting layer a car on that lane uses ("Car" on the ground, "MotorwayCar" on bridges), just below the
@@ -182,6 +182,8 @@ namespace RouteViz
                 "Mouse movement allowed between press and release for it to count as a click.");
             _toggleKeyName = Config.Bind("Input", "ToggleKey", "C",
                 "Key that clears every route (a UnityEngine.KeyCode name). Alt + this key hides/shows all routes. None disables both.");
+            _heatmapKeyName = Config.Bind("Input", "HeatmapKey", "H",
+                "Key that shows/hides the traffic heatmap (a UnityEngine.KeyCode name). None disables.");
             _soundVolume = Config.Bind("Input", "SoundVolume", 0.5f,
                 "Volume of the click sounds (ding on, dong off, buzz for a car with no route), 0 to 1. 0 mutes.");
             _useGameSounds = Config.Bind("Input", "UseGameSounds", true,
@@ -194,6 +196,7 @@ namespace RouteViz
 
             ParseSettings();
             _toggleKeyName.SettingChanged += (_, __) => ParseSettings();
+            _heatmapKeyName.SettingChanged += (_, __) => ParseSettings();
 
             try
             {
@@ -245,6 +248,8 @@ namespace RouteViz
                     _routesButton.SetActive(false);
                 if (_clearButton != null)
                     _clearButton.SetActive(false);
+                if (_heatButton != null)
+                    _heatButton.SetActive(false);
             }
             catch { /* UI may already be gone */ }
         }
@@ -272,6 +277,7 @@ namespace RouteViz
             catch { /* ignore */ }
 
             // UI clones: never Destroy here (quit races the UI Camera). Hot reload uses DestroyLeftover on recreate.
+            AbandonHeatButton();
             AbandonClearButton();
             AbandonRoutesButton();
 
@@ -290,6 +296,7 @@ namespace RouteViz
 
             try
             {
+                DestroyHeatmap();
                 DestroyOverlays();
                 foreach (Selection s in _selections)
                     foreach (RouteMesh mesh in s.Lines)
@@ -324,6 +331,16 @@ namespace RouteViz
                 Logger.LogWarning($"Unknown ToggleKey '{_toggleKeyName.Value}'; using C.");
                 _toggleKey = KeyCode.C;
             }
+
+            try
+            {
+                _heatmapKey = (KeyCode)Enum.Parse(typeof(KeyCode), _heatmapKeyName.Value.Trim(), true);
+            }
+            catch (Exception)
+            {
+                Logger.LogWarning($"Unknown HeatmapKey '{_heatmapKeyName.Value}'; using H.");
+                _heatmapKey = KeyCode.H;
+            }
         }
 
         private void Update()
@@ -349,6 +366,14 @@ namespace RouteViz
             catch (Exception e)
             {
                 if (!_clearButtonFailed) { _clearButtonFailed = true; Logger.LogError($"Clear button failed: {e}"); }
+            }
+            try
+            {
+                UpdateHeatButton();
+            }
+            catch (Exception e)
+            {
+                if (!_heatButtonFailed) { _heatButtonFailed = true; Logger.LogError($"Heatmap button failed: {e}"); }
             }
 
             try
@@ -405,6 +430,19 @@ namespace RouteViz
                 }
             }
 
+            try
+            {
+                UpdateHeatmap();
+            }
+            catch (Exception e)
+            {
+                if (!_loggedHeatError)
+                {
+                    _loggedHeatError = true;
+                    Logger.LogError($"Drawing heatmap failed: {e}");
+                }
+            }
+
             if (!_routesVisible)
             {
                 foreach (Selection s in _selections)
@@ -443,8 +481,11 @@ namespace RouteViz
                 }
             }
 
+            if (_heatmapKey != KeyCode.None && Input.GetKeyDown(_heatmapKey))
+                ToggleHeatmap();
+
             // Over game UI (e.g. the routes button): not a map click, and no hover rings.
-            if (PointerOverUI() || PointerOverClearButton())
+            if (PointerOverUI() || PointerOverClearButton() || PointerOverHeatButton())
             {
                 _mouseDownTracked = false;
                 _hover = null;

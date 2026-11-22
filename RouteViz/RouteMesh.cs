@@ -55,6 +55,21 @@ namespace RouteViz
             Ribbon(points, width * 0.5f * InnerFraction, pale);
             Arrows(points, us, width, cycle, outer);
 
+            Upload();
+        }
+
+        /// <summary>Solid coloured band (no arrows) for heatmaps; vertex alpha is kept so cool edges can fade.</summary>
+        public void BuildSolid(List<Vector3> points, Color color, float width)
+        {
+            Verts.Clear();
+            Colors.Clear();
+            Tris.Clear();
+            Ribbon(points, width * 0.5f, (Color32)color);
+            Upload();
+        }
+
+        private void Upload()
+        {
             _mesh.Clear();
             _mesh.SetVertices(Verts);
             _mesh.SetColors(Colors);

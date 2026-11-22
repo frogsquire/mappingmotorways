@@ -128,7 +128,7 @@ namespace RouteViz
             foreach (Selection s in _selections)
                 selections.Add(new object[] { s.Model, s.Id, s.GroupIndex, s.Variant });
 
-            AppDomain.CurrentDomain.SetData(SavedStateKey, new object[] { histories, selections, _routesVisible });
+            AppDomain.CurrentDomain.SetData(SavedStateKey, new object[] { histories, selections, _routesVisible, _heatmapVisible });
         }
 
         private void RestoreStateAfterReload()
@@ -173,6 +173,8 @@ namespace RouteViz
                     }
 
                 _routesVisible = (bool)saved[2];
+                if (saved.Length > 3)
+                    _heatmapVisible = (bool)saved[3];
                 Logger.LogInfo($"Restored {restored} route(s) and {_histories.Count} trip histories from before the reload.");
             }
             catch (Exception e)
