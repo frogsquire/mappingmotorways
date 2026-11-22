@@ -1,0 +1,7 @@
+{
+  "name": "BepInExPack_MiniMotorways",
+  "version_number": "{{PACK_VERSION}}",
+  "website_url": "{{WEBSITE_URL}}",
+  "description": "BepInEx 5.4.23.2 (x86) for Mini Motorways, preconfigured: unstripped Mono corlibs, HideManagerGameObject, and the StrippedApiShim patcher this game needs.",
+  "dependencies": []
+}

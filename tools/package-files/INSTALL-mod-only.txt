@@ -1,0 +1,39 @@
+RouteViz {{VERSION}} for Mini Motorways  -  mod-only package
+==========================================================
+
+This package is for people who ALREADY have BepInEx 5 (x86) working in Mini Motorways.
+If you don't, download the all-in-one package instead.
+
+"Working" means all of these are true in your game folder:
+  - BepInEx 5.4.x x86 is installed (winhttp.dll next to "Mini Motorways.exe").
+  - Complete ("unstripped") Mono class libraries for Unity 2022.3.62f2 (Windows) are in
+    BepInEx\unstripped_corlib, and doorstop_config.ini has
+       dll_search_path_override = BepInEx\unstripped_corlib
+  - BepInEx\config\BepInEx.cfg has, under [Chainloader]:
+       HideManagerGameObject = true
+
+
+INSTALL
+-------
+Extract this zip into the game folder (the one containing "Mini Motorways.exe").
+It adds:
+   BepInEx\plugins\RouteViz\RouteViz.dll   the mod
+   BepInEx\patchers\StrippedApiShim.dll    required support patcher (adds, in memory,
+                                           a few Unity methods that BepInEx needs and
+                                           this game's build left out)
+Then start the game. BepInEx\LogOutput.log should contain "RouteViz {{VERSION}} loaded."
+
+If you installed an older RouteViz by hand as BepInEx\scripts\RouteViz.dll, delete that
+file, or the mod loads twice.
+
+
+UNINSTALL
+---------
+Delete BepInEx\plugins\RouteViz. Keep BepInEx\patchers\StrippedApiShim.dll if you use
+other BepInEx mods in this game (BepInEx needs it here); otherwise delete it too.
+Settings are in BepInEx\config\motorways.routeviz.cfg.
+
+
+LICENCES
+--------
+See LICENSE. This is an unofficial fan mod, not made or supported by Dinosaur Polo Club.

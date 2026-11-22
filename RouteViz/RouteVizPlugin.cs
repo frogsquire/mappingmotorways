@@ -68,6 +68,9 @@ namespace RouteViz
         /// <summary>False while the overlay is toggled off; selections are kept and reappear when toggled back on.</summary>
         private bool _routesVisible = true;
 
+        /// <summary>True after quit starts; skip Destroy on runtime textures (Unity releases them and complains if we do).</summary>
+        private bool _quitting;
+
         /// <summary>One selected car and the lines showing its route.</summary>
         private sealed class Selection
         {
@@ -211,6 +214,11 @@ namespace RouteViz
             Logger.LogInfo($"{Name} {Version} loaded.");
         }
 
+        private void OnApplicationQuit()
+        {
+            _quitting = true;
+        }
+
         /// <summary>Removes every line this plugin made, so unloading or hot-reloading leaves nothing behind.</summary>
         private void OnDestroy()
         {
@@ -223,6 +231,8 @@ namespace RouteViz
                 Logger.LogWarning($"Couldn't save state for the next reload: {e.Message}");
             }
             _sounds?.Dispose();
+            // Clear first so it drops the shared ring sprite before Routes destroys that texture.
+            DestroyClearButton();
             DestroyRoutesButton();
             DestroyOverlays();
             foreach (Selection s in _selections)
@@ -270,6 +280,14 @@ namespace RouteViz
             catch (Exception e)
             {
                 if (!_routesButtonFailed) { _routesButtonFailed = true; Logger.LogError($"Routes button failed: {e}"); }
+            }
+            try
+            {
+                UpdateClearButton();
+            }
+            catch (Exception e)
+            {
+                if (!_clearButtonFailed) { _clearButtonFailed = true; Logger.LogError($"Clear button failed: {e}"); }
             }
 
             try
@@ -356,9 +374,7 @@ namespace RouteViz
                 bool alt = Input.GetKey(KeyCode.LeftAlt) || Input.GetKey(KeyCode.RightAlt) || Input.GetKey(KeyCode.AltGr);
                 if (!alt)
                 {
-                    if (ClearSelections() > 0)
-                        PlayClick(Sounds.Kind.Dong);
-                    _routesVisible = true; // nothing left to hide; make the next click show its route
+                    ClearAllRoutes(false);
                 }
                 else
                 {
@@ -367,7 +383,7 @@ namespace RouteViz
             }
 
             // Over game UI (e.g. the routes button): not a map click, and no hover rings.
-            if (PointerOverUI())
+            if (PointerOverUI() || PointerOverClearButton())
             {
                 _mouseDownTracked = false;
                 _hover = null;

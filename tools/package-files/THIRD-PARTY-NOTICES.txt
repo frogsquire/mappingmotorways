@@ -1,0 +1,48 @@
+THIRD-PARTY NOTICES
+===================
+
+This package contains software by other people. Their licence texts are in the
+"licenses" folder next to this file. None of it has been modified.
+
+Not every package contains every item below: the mod-only package contains only our
+own files.
+
+1. BepInEx 5.4.23.2 (x86)  -  MIT License
+   Files: BepInEx\core\BepInEx.dll, BepInEx.Preloader.dll, BepInEx.Harmony.dll,
+          HarmonyXInterop.dll (and their .xml docs), changelog.txt
+   Source: https://github.com/BepInEx/BepInEx/tree/v5.4.23.2
+   Licence: licenses\BepInEx-LICENSE.txt
+
+2. Unity Doorstop 4.3.0  -  GNU Lesser General Public License v2.1
+   Files: winhttp.dll, doorstop_config.ini, .doorstop_version
+   Source code for exactly this version:
+          https://github.com/NeighTools/UnityDoorstop/tree/v4.3.0
+   Licence: licenses\UnityDoorstop-LICENSE.txt
+   You may replace winhttp.dll with your own build of Unity Doorstop.
+
+3. HarmonyX  -  MIT License
+   Files: BepInEx\core\0Harmony.dll, 0Harmony20.dll (and .xml)
+   Source: https://github.com/BepInEx/HarmonyX
+   Licence: licenses\HarmonyX-LICENSE.txt
+
+4. MonoMod  -  MIT License
+   Files: BepInEx\core\MonoMod.RuntimeDetour.dll, MonoMod.Utils.dll (and .xml)
+   Source: https://github.com/MonoMod/MonoMod
+   Licence: licenses\MonoMod-LICENSE.txt
+
+5. Mono.Cecil  -  MIT License
+   Files: BepInEx\core\Mono.Cecil*.dll
+   Source: https://github.com/jbevain/cecil
+   Licence: licenses\Mono.Cecil-LICENSE.txt
+
+6. Mono class libraries, as built by Unity for Unity 2022.3.62f2 (Windows, "unityjit")
+   -  MIT License (see the licence file for the few third-party exceptions)
+   Files: BepInEx\unstripped_corlib\*.dll  (mscorlib, netstandard, System*, Mono.Security)
+   Source: https://github.com/Unity-Technologies/mono  (Unity's fork of https://github.com/mono/mono)
+   Licence: licenses\Mono-LICENSE.txt
+   These are standard, unmodified runtime libraries. Mini Motorways ships cut-down
+   ("stripped") copies of them that are missing parts BepInEx needs; Unity Doorstop loads
+   these complete copies instead. No file belonging to Mini Motorways is included.
+
+Mini Motorways is (c) Dinosaur Polo Club. This is an unofficial fan mod; it is not made,
+endorsed or supported by Dinosaur Polo Club. It contains none of the game's files.

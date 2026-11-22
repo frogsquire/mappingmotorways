@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using System.Reflection;
 using Motorways.Models;
 using Motorways.Processes;
 using Motorways.Views;
@@ -13,19 +14,32 @@ namespace RouteViz
         private const int RingSegments = 40;
         private const float FlashSeconds = 0.55f;
         private const float FlashPeak = 0.85f;
+        private const float FlashRiseSeconds = 0.06f;
+        private const string FlashObjectName = "RouteViz_CarFlash";
         private static readonly Color RingColor = new Color(0f, 0f, 0f, 0.55f);
+        private static readonly int ColorPropertyId = Shader.PropertyToID("_Color");
 
+        private static readonly FieldInfo BodyRendererField =
+            typeof(VehicleView).GetField("_combinedMeshVehicleRenderer", BindingFlags.Instance | BindingFlags.NonPublic);
+
+        /// <summary>A white copy of the car's own body mesh, parented to the body so it follows the car,
+        /// drawn just above it and faded out: the car itself lights up, not a shape around it.</summary>
         private sealed class Flash
         {
             public VehicleView View;
             public VehicleModel Model;
             public float Start;
-            public LineRenderer Disc;
+            public Renderer Body;
+            public MeshRenderer Overlay;
         }
 
         private VehicleView _hover;
         private LineRenderer _hoverRing;
         private readonly List<Flash> _flashes = new List<Flash>();
+        private MaterialPropertyBlock _flashBlock;
+        // The game's body mesh carries theme indices in its vertex colours (r = index, g = b = 0), which
+        // Sprites/Default would multiply in; so each body mesh gets one copy with plain white vertices.
+        private readonly Dictionary<Mesh, Mesh> _whiteMeshes = new Dictionary<Mesh, Mesh>();
         private Sounds _sounds;
 
         /// <summary>The car whose click circle contains the screen point (the nearest one if circles overlap).</summary>
@@ -128,12 +142,66 @@ namespace RouteViz
 
         private void StartFlash(VehicleView view)
         {
-            _flashes.Add(new Flash { View = view, Model = view.Model, Start = Time.unscaledTime });
+            if (view == null || view.Model == null)
+                return;
+            foreach (Flash existing in _flashes)
+                if (existing.View == view && existing.Model == view.Model && existing.Overlay != null)
+                {
+                    existing.Start = Time.unscaledTime; // flashing already: just start over
+                    return;
+                }
+
+            Renderer body = BodyRendererField?.GetValue(view) as Renderer;
+            MeshFilter source = body != null ? body.GetComponent<MeshFilter>() : null;
+            Mesh white = source != null ? GetWhiteMesh(source.sharedMesh) : null;
+            if (white == null)
+                return;
+
+            RemoveStrayFlashes(body.transform);
+            var go = new GameObject(FlashObjectName);
+            go.transform.SetParent(body.transform, false); // follows the car; same local frame as the body mesh
+            go.AddComponent<MeshFilter>().sharedMesh = white;
+            var overlay = go.AddComponent<MeshRenderer>();
+            overlay.sharedMaterial = GetMaterial(view.transform.parent);
+            overlay.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+            overlay.receiveShadows = false;
+            overlay.enabled = false; // DrawOverlays sets colour and sorting before the first draw
+            _flashes.Add(new Flash { View = view, Model = view.Model, Start = Time.unscaledTime, Body = body, Overlay = overlay });
+        }
+
+        private Mesh GetWhiteMesh(Mesh source)
+        {
+            if (source == null)
+                return null;
+            if (_whiteMeshes.TryGetValue(source, out Mesh white) && white != null)
+                return white;
+            white = Instantiate(source);
+            white.name = "RouteViz_WhiteCar";
+            var colors = new Color[white.vertexCount];
+            for (int i = 0; i < colors.Length; i++)
+                colors[i] = Color.white;
+            white.colors = colors;
+            _whiteMeshes[source] = white;
+            return white;
+        }
+
+        /// <summary>Removes flash overlays left on a car body by an earlier load of the plugin.</summary>
+        private static void RemoveStrayFlashes(Transform body)
+        {
+            for (int i = body.childCount - 1; i >= 0; i--)
+            {
+                Transform child = body.GetChild(i);
+                if (child.name == FlashObjectName)
+                    Destroy(child.gameObject);
+            }
         }
 
         /// <summary>Positions the hover ring and flashes on their cars. Runs in LateUpdate, after cars have moved.</summary>
         private void DrawOverlays()
         {
+            // Flashes first, so a failure further down can't leave a car lit up.
+            UpdateFlashes();
+
             // Hover ring.
             VehicleView hover = _hover;
             if (hover != null && _routesVisible && hover.Model != null && hover.gameObject.activeInHierarchy
@@ -163,38 +231,34 @@ namespace RouteViz
             }
 
             DrawBuildingOutline();
+        }
 
-            // Flashes: a white disc over the car that pops in and fades out.
+        /// <summary>Fades each flash in then out, and removes it once done or once its car is gone or recycled.</summary>
+        private void UpdateFlashes()
+        {
             for (int i = _flashes.Count - 1; i >= 0; i--)
             {
                 Flash f = _flashes[i];
                 float t = Time.unscaledTime - f.Start;
-                if (t >= FlashSeconds || f.View == null || f.View.Model != f.Model || !f.View.gameObject.activeInHierarchy)
+                if (t >= FlashSeconds || f.View == null || f.View.Model != f.Model || f.Body == null || f.Overlay == null
+                    || !f.View.gameObject.activeInHierarchy)
                 {
-                    ReleaseLine(ref f.Disc);
+                    if (f.Overlay != null)
+                        Destroy(f.Overlay.gameObject);
                     _flashes.RemoveAt(i);
                     continue;
                 }
 
-                float alpha = t < 0.06f ? t / 0.06f : 1f - (t - 0.06f) / (FlashSeconds - 0.06f);
+                float alpha = t < FlashRiseSeconds ? t / FlashRiseSeconds : 1f - (t - FlashRiseSeconds) / (FlashSeconds - FlashRiseSeconds);
                 alpha = Mathf.Clamp01(alpha) * FlashPeak;
-                float diameter = (float)VehicleMovementProcess.VehicleLength * (1.1f + 0.4f * Mathf.Clamp01(t / FlashSeconds));
-                Vector3 c = f.View.transform.localPosition;
-
-                f.Disc = EnsureLine(f.Disc, f.View.transform.parent);
-                f.Disc.numCapVertices = 12; // two nearly coincident points + round caps = a filled circle
-                f.Disc.startWidth = diameter;
-                f.Disc.endWidth = diameter;
-                var color = new Color(1f, 1f, 1f, alpha);
-                f.Disc.startColor = color;
-                f.Disc.endColor = color;
-                f.Disc.sortingLayerID = CarSortingLayer(f.View);
-                f.Disc.sortingOrder = OverlaySortingOrder;
-                _pointBuffer[0] = new Vector3(c.x - 0.001f, c.y, LineZ);
-                _pointBuffer[1] = new Vector3(c.x + 0.001f, c.y, LineZ);
-                f.Disc.positionCount = 2;
-                f.Disc.SetPositions(_pointBuffer);
-                f.Disc.enabled = true;
+                if (_flashBlock == null)
+                    _flashBlock = new MaterialPropertyBlock();
+                _flashBlock.SetColor(ColorPropertyId, new Color(1f, 1f, 1f, alpha));
+                f.Overlay.SetPropertyBlock(_flashBlock);
+                // Ground cars draw on "Car", cars on bridges on "MotorwayCar"; stay just above the body either way.
+                f.Overlay.sortingLayerID = f.Body.sortingLayerID;
+                f.Overlay.sortingOrder = f.Body.sortingOrder + 1;
+                f.Overlay.enabled = f.Body.enabled;
             }
         }
 
@@ -229,9 +293,13 @@ namespace RouteViz
                 Destroy(_hoverRing.gameObject);
             _hoverRing = null;
             foreach (Flash f in _flashes)
-                if (f.Disc != null)
-                    Destroy(f.Disc.gameObject);
+                if (f.Overlay != null)
+                    Destroy(f.Overlay.gameObject);
             _flashes.Clear();
+            foreach (Mesh m in _whiteMeshes.Values)
+                if (m != null)
+                    Destroy(m);
+            _whiteMeshes.Clear();
         }
     }
 }
