@@ -14,7 +14,8 @@ namespace RouteViz
 {
     /// <summary>
     /// An in-game button next to the top-left back arrow that shows/hides all routes (like Alt+C).
-    /// It's a clone of the back button, so it looks, animates, floats in/out and sounds like the game's own buttons.
+    /// It's a clone of the back button (so it floats in/out with it), drawn as a dark outlined round icon,
+    /// with its own hover/press feedback instead of the back button's animator.
     /// </summary>
     public partial class RouteVizPlugin
     {
@@ -22,28 +23,49 @@ namespace RouteViz
         private const string RoutesAnchorName = "RouteViz_RoutesButton (Active)";
         private const string RoutesInactiveAnchorName = "RouteViz_RoutesButton (Inactive)";
         /// <summary>Distance from the back button's centre to ours, in the parent's units (button is 100 wide, scale 1.1).</summary>
-        private const float RoutesButtonSpacing = 200f;
-        private const int IconSize = 128;
-        /// <summary>Glyph box size (the back arrow's is 75; our icon fills its box more).</summary>
-        private const float IconDisplaySize = 66f;
+        private const float RoutesButtonSpacing = 160f;
+        /// <summary>The icon is designed in a 128x128 space (y down) and rendered at 256 px, with mipmaps.</summary>
+        private const float IconDesignSize = 128f;
+        private const int IconTextureSize = 256;
+        /// <summary>Width of the anti-aliased edge ramp in button units (~1.4 screen px at 1080p-ish scale, like the game's sprites).</summary>
+        private const float EdgeSoftness = 1.2f;
+        /// <summary>Glyph box size inside the ring.</summary>
+        private const float IconDisplaySize = 64f;
+        /// <summary>Ring outer diameter and stroke, in the button's units.</summary>
+        private const float RingDiameter = 86f;
+        private const float RingStroke = 7f;
+        private const int RingTextureSize = 256;
+        /// <summary>Hit area (the back button's is 163x160, which would overlap the back button at this spacing).</summary>
+        private const float ColliderSize = 110f;
         private const float HiddenGlyphAlpha = 0.35f;
+        private const float HoverScale = 1.08f;
+        private const float PressScale = 0.94f;
+        /// <summary>Exponential easing rate: ~90% of the way in 0.1 s.</summary>
+        private const float ScaleEaseRate = 23f;
 
         private GameObject _routesButton;
         private TouchButton _routesBackButton;
         private RectTransform _routesButtonRect;
+        private RectTransform _routesCollider;
+        private Canvas _routesCanvas;
         private GameObject _routesAnchor, _routesInactiveAnchor, _backAnchor;
-        /// <summary>Dim the glyph and its shadow; CanvasGroups the Animator has no curves for, so it never fights them.</summary>
-        private CanvasGroup _routesGlyphGroup, _routesShadowGroup;
-        private Texture2D _routesIconTexture;
-        private Sprite _routesIconSprite;
+        private Transform _backInactiveAnchor;
+        private Image _routesSymbol, _routesRing;
+        /// <summary>Dim the glyph and ring while routes are hidden.</summary>
+        private CanvasGroup _routesGlyphGroup, _routesRingGroup;
+        private float _routesScale = 1f;
+        private bool _routesPressed;
+        private Texture2D _routesIconTexture, _routesRingTexture;
+        private Sprite _routesIconSprite, _routesRingSprite;
         private float _nextRoutesButtonCheck;
         private bool _routesButtonFailed;
 
         /// <summary>Alt+C and the on-screen button: hide or show every route without dropping the selections.</summary>
-        private void ToggleRoutesVisible()
+        private void ToggleRoutesVisible(bool playSound = true)
         {
             _routesVisible = !_routesVisible;
-            PlayClick(_routesVisible ? Sounds.Kind.Ding : Sounds.Kind.Error);
+            if (playSound)
+                PlayClick(_routesVisible ? Sounds.Kind.Ding : Sounds.Kind.Error);
             Logger.LogInfo(_routesVisible
                 ? $"Routes shown ({_selections.Count})."
                 : $"Routes hidden ({_selections.Count} kept; press Alt+{_toggleKey} to show).");
@@ -62,8 +84,18 @@ namespace RouteViz
             {
                 // fall through to the rect check
             }
-            return _routesButtonRect != null && _routesButton != null && _routesButton.activeInHierarchy &&
-                   RectTransformUtility.RectangleContainsScreenPoint(_routesButtonRect, Input.mousePosition, null);
+            return PointerOverRoutesButton();
+        }
+
+        private bool PointerOverRoutesButton()
+        {
+            if (_routesButton == null || !_routesButton.activeInHierarchy)
+                return false;
+            RectTransform hit = _routesCollider != null ? _routesCollider : _routesButtonRect;
+            Camera cam = _routesCanvas != null && _routesCanvas.renderMode != RenderMode.ScreenSpaceOverlay
+                ? _routesCanvas.worldCamera
+                : null;
+            return hit != null && RectTransformUtility.RectangleContainsScreenPoint(hit, Input.mousePosition, cam);
         }
 
         /// <summary>Called from Update: (re)creates the button whenever the game UI exists without it.</summary>
@@ -80,12 +112,8 @@ namespace RouteViz
                     _routesAnchor.SetActive(_backAnchor.activeSelf);
                 if (_routesBackButton != null && _routesButton.activeSelf != _routesBackButton.gameObject.activeSelf)
                     _routesButton.SetActive(_routesBackButton.gameObject.activeSelf);
-
-                float alpha = _routesVisible ? 1f : HiddenGlyphAlpha;
-                if (_routesGlyphGroup != null && _routesGlyphGroup.alpha != alpha)
-                    _routesGlyphGroup.alpha = alpha;
-                if (_routesShadowGroup != null && _routesShadowGroup.alpha != alpha)
-                    _routesShadowGroup.alpha = alpha;
+                SyncAnchorPair(_backAnchor, _backInactiveAnchor, _routesAnchor, _routesInactiveAnchor, RoutesButtonSpacing);
+                AnimateRoutesButton();
                 return;
             }
 
@@ -101,6 +129,10 @@ namespace RouteViz
                 screen = Object.FindObjectOfType<GameUIScreen>();
             if (screen == null || screen.backButton == null)
                 return;
+            // Cold start: the back button is still floating in / laying out; cloning then snapshots a bad
+            // position (F6 works because the UI has settled). Wait until it's at rest.
+            if (!BackButtonReady(screen.backButton))
+                return;
 
             try
             {
@@ -112,6 +144,37 @@ namespace RouteViz
                 Logger.LogError($"Couldn't create the routes button: {e}");
                 DestroyRoutesButton(false);
             }
+        }
+
+        /// <summary>Hover grows the icon and ring a little, pressing shrinks them; hidden routes dim them.</summary>
+        private void AnimateRoutesButton()
+        {
+            bool over = PointerOverRoutesButton();
+            if (Input.GetMouseButtonDown(0))
+                _routesPressed = over;
+            else if (!Input.GetMouseButton(0))
+                _routesPressed = false;
+
+            float target = _routesPressed && over ? PressScale : over ? HoverScale : 1f;
+            float k = 1f - (float)Math.Exp(-ScaleEaseRate * Time.unscaledDeltaTime);
+            _routesScale += (target - _routesScale) * k;
+            if (Math.Abs(target - _routesScale) < 0.001f)
+                _routesScale = target;
+            var scale = new Vector3(_routesScale, _routesScale, 1f);
+            if (_routesSymbol != null && _routesSymbol.transform.localScale != scale)
+                _routesSymbol.transform.localScale = scale;
+            if (_routesRing != null && _routesRing.transform.localScale != scale)
+                _routesRing.transform.localScale = scale;
+
+            // The ring follows the glyph's (themed) colour.
+            if (_routesSymbol != null && _routesRing != null && _routesRing.color != _routesSymbol.color)
+                _routesRing.color = _routesSymbol.color;
+
+            float alpha = _routesVisible ? 1f : HiddenGlyphAlpha;
+            if (_routesGlyphGroup != null && _routesGlyphGroup.alpha != alpha)
+                _routesGlyphGroup.alpha = alpha;
+            if (_routesRingGroup != null && _routesRingGroup.alpha != alpha)
+                _routesRingGroup.alpha = alpha;
         }
 
         private void CreateRoutesButton(TouchButton back)
@@ -128,31 +191,17 @@ namespace RouteViz
             {
                 go = Object.Instantiate(back.gameObject, holder.transform, false);
 
-                // FloatingElement places the button at its anchor (and floats it to the inactive anchor when the
-                // game hides it). Give ours its own anchors, offset from the back button's.
-                Component floating = null;
                 foreach (Component c in go.GetComponents<Component>())
-                    if (c != null && c.GetType().Name == "FloatingElement")
-                        floating = c;
-                if (floating != null)
                 {
-                    FieldInfo baseField = FindField(floating.GetType(), "baseElement");
-                    FieldInfo inactiveField = FindField(floating.GetType(), "_inactiveAnchor");
-                    var backBase = baseField?.GetValue(floating) as GameObject;
-                    var backInactive = inactiveField?.GetValue(floating) as Transform;
-                    if (backBase != null && backInactive != null)
-                    {
-                        _backAnchor = backBase;
-                        _routesAnchor = CloneAnchor(backBase, RoutesAnchorName, offset);
-                        _routesInactiveAnchor = CloneAnchor(backInactive.gameObject, RoutesInactiveAnchorName, offset);
-                        baseField.SetValue(floating, _routesAnchor);
-                        inactiveField.SetValue(floating, _routesInactiveAnchor.transform);
-                    }
-                    else
-                    {
-                        Logger.LogWarning("Back button's FloatingElement anchors not found; placing the routes button directly.");
-                        Object.DestroyImmediate(floating);
-                    }
+                    if (c == null)
+                        continue;
+                    string typeName = c.GetType().Name;
+                    // The back button's Animator produces the gold hover circle; we do our own feedback instead.
+                    // (It doesn't move the button: FloatingElement does the float in/out.)
+                    if (typeName == "Animator")
+                        ((Behaviour)c).enabled = false;
+                    else if (typeName == "FloatingElement")
+                        RetargetFloatingElement(c, offset);
                 }
                 go.transform.SetParent(parent, false);
             }
@@ -163,6 +212,9 @@ namespace RouteViz
             go.name = RoutesButtonName;
             _routesButton = go;
             _routesBackButton = back;
+            _routesCanvas = parent.GetComponentInParent<Canvas>();
+            if (_routesCanvas != null)
+                _routesCanvas = _routesCanvas.rootCanvas;
 
             var rect = (RectTransform)go.transform;
             rect.anchoredPosition = ((RectTransform)back.transform).anchoredPosition + offset;
@@ -175,31 +227,146 @@ namespace RouteViz
                 throw new MissingFieldException("TouchButton._onClick");
             onClick.SetValue(button, Activator.CreateInstance(onClick.FieldType));
             button.AddOnClickedEvent(new UnityAction(OnRoutesButtonClicked));
-            // No "back" sound: our own ding/buzz plays on click.
-            FieldInfo audioProfile = FindField(typeof(TouchButton), "_audioProfile");
-            if (audioProfile != null && audioProfile.FieldType.IsEnum && Enum.IsDefined(audioProfile.FieldType, "None"))
-                audioProfile.SetValue(button, Enum.Parse(audioProfile.FieldType, "None"));
+            // The game's ordinary button sound instead of the back sound.
+            ApplyGameButtonSound(button, back);
 
+            // With the Animator off, the children keep whatever it last wrote; set the resting look explicitly.
             Sprite icon = GetRoutesIcon();
             foreach (Transform child in go.transform)
             {
                 switch (child.name)
                 {
                     case "Symbol":
-                    case "Symbol-Highlight":
-                    case "ArrowDropShadow":
-                        child.GetComponent<Image>().sprite = icon;
+                        _routesSymbol = child.GetComponent<Image>();
+                        _routesSymbol.sprite = icon;
+                        _routesSymbol.raycastTarget = false;
+                        Color c = _routesSymbol.color;
+                        c.a = 1f;
+                        _routesSymbol.color = c;
                         ((RectTransform)child).sizeDelta = new Vector2(IconDisplaySize, IconDisplaySize);
-                        if (child.name == "Symbol")
-                            _routesGlyphGroup = AddGroup(child);
-                        else if (child.name == "ArrowDropShadow")
-                            _routesShadowGroup = AddGroup(child);
+                        child.localScale = Vector3.one;
+                        child.gameObject.SetActive(true);
+                        _routesGlyphGroup = AddGroup(child);
+                        break;
+                    case "Collider":
+                        _routesCollider = (RectTransform)child;
+                        _routesCollider.sizeDelta = new Vector2(ColliderSize, ColliderSize);
+                        child.gameObject.SetActive(true);
+                        break;
+                    case "BG_Circle":
+                        // Keep the cream disc for contrast. Reset colour/scale: Instantiate copies the live
+                        // back button, which may still be mid fade-in on a cold start.
+                        {
+                            var bg = child.GetComponent<Image>();
+                            if (bg != null)
+                            {
+                                Color bgc = bg.color;
+                                bgc.a = 1f;
+                                bg.color = bgc;
+                                bg.enabled = true;
+                            }
+                            child.localScale = Vector3.one;
+                            child.gameObject.SetActive(true);
+                        }
+                        break;
+                    default:
+                        // Gold hover circle, white highlight glyph, light background circles, arrow shadow.
+                        child.gameObject.SetActive(false);
                         break;
                 }
             }
 
+            if (_routesSymbol != null)
+            {
+                var ringGo = new GameObject("RouteViz_Ring", typeof(RectTransform), typeof(CanvasRenderer), typeof(Image));
+                ringGo.transform.SetParent(go.transform, false);
+                ringGo.transform.SetSiblingIndex(_routesSymbol.transform.GetSiblingIndex());
+                var ringRect = (RectTransform)ringGo.transform;
+                ringRect.anchorMin = ringRect.anchorMax = new Vector2(0.5f, 0.5f);
+                ringRect.pivot = new Vector2(0.5f, 0.5f);
+                ringRect.anchoredPosition = ((RectTransform)_routesSymbol.transform).anchoredPosition;
+                ringRect.sizeDelta = new Vector2(RingDiameter, RingDiameter);
+                _routesRing = ringGo.GetComponent<Image>();
+                _routesRing.sprite = GetRingSprite();
+                _routesRing.color = _routesSymbol.color;
+                _routesRing.raycastTarget = false;
+                _routesRingGroup = AddGroup(ringGo.transform);
+            }
+            _routesScale = 1f;
+            _routesPressed = false;
+
             if (_verboseLogging.Value)
                 Logger.LogInfo($"Routes button created at {rect.anchoredPosition} next to the back button.");
+        }
+
+        /// <summary>
+        /// FloatingElement places the button at its anchor (and floats it to the inactive anchor when the game hides it).
+        /// Give ours its own anchors, offset from the back button's.
+        /// </summary>
+        private void RetargetFloatingElement(Component floating, Vector2 offset)
+        {
+            FieldInfo baseField = FindField(floating.GetType(), "baseElement");
+            FieldInfo inactiveField = FindField(floating.GetType(), "_inactiveAnchor");
+            var backBase = baseField?.GetValue(floating) as GameObject;
+            var backInactive = inactiveField?.GetValue(floating) as Transform;
+            if (backBase == null || backInactive == null)
+            {
+                Logger.LogWarning("Back button's FloatingElement anchors not found; placing the routes button directly.");
+                Object.DestroyImmediate(floating);
+                return;
+            }
+            _backAnchor = backBase;
+            _backInactiveAnchor = backInactive;
+            _routesAnchor = CloneAnchor(backBase, RoutesAnchorName, offset);
+            _routesInactiveAnchor = CloneAnchor(backInactive.gameObject, RoutesInactiveAnchorName, offset);
+            baseField.SetValue(floating, _routesAnchor);
+            inactiveField.SetValue(floating, _routesInactiveAnchor.transform);
+        }
+
+        /// <summary>
+        /// True once the back button's float-in has finished and its active anchor is on. Cloning earlier
+        /// copies a mid-animation pose and freezes our anchors at a pre-layout position.
+        /// </summary>
+        private static bool BackButtonReady(TouchButton back)
+        {
+            if (back == null || !back.isActiveAndEnabled || !back.gameObject.activeInHierarchy)
+                return false;
+            Component fe = null;
+            foreach (Component c in back.GetComponents<Component>())
+            {
+                if (c != null && c.GetType().Name == "FloatingElement")
+                {
+                    fe = c;
+                    break;
+                }
+            }
+            if (fe == null)
+                return true;
+            var baseEl = FindField(fe.GetType(), "baseElement")?.GetValue(fe) as GameObject;
+            if (baseEl == null || !baseEl.activeInHierarchy)
+                return false;
+            var animating = fe.GetType().GetProperty("IsAnimating")?.GetValue(fe) as bool?;
+            return animating != true;
+        }
+
+        /// <summary>Keep our float anchors locked to the back button's, so late layout moves don't leave us stranded.</summary>
+        private static void SyncAnchorPair(GameObject backActive, Transform backInactive, GameObject ourActive, GameObject ourInactive, float spacing)
+        {
+            var offset = new Vector2(spacing, 0f);
+            if (backActive != null && ourActive != null)
+            {
+                var want = ((RectTransform)backActive.transform).anchoredPosition + offset;
+                var r = (RectTransform)ourActive.transform;
+                if (r.anchoredPosition != want)
+                    r.anchoredPosition = want;
+            }
+            if (backInactive != null && ourInactive != null)
+            {
+                var want = ((RectTransform)backInactive).anchoredPosition + offset;
+                var r = (RectTransform)ourInactive.transform;
+                if (r.anchoredPosition != want)
+                    r.anchoredPosition = want;
+            }
         }
 
         private static CanvasGroup AddGroup(Transform t)
@@ -234,7 +401,7 @@ namespace RouteViz
         {
             try
             {
-                ToggleRoutesVisible();
+                ToggleRoutesVisible(playSound: false); // the button plays the game's click sound itself
             }
             catch (Exception e)
             {
@@ -242,9 +409,13 @@ namespace RouteViz
             }
         }
 
-        /// <summary>OnDestroy: remove the button and its anchors, and (when unloading) the icon too.</summary>
-        private void DestroyRoutesButton(bool includeIcon = true)
+        /// <summary>OnDestroy: remove the button and its anchors, and (when unloading) the sprites too.</summary>
+        private void DestroyRoutesButton(bool includeSprites = true)
         {
+            if (_routesSymbol != null)
+                _routesSymbol.sprite = null;
+            if (_routesRing != null)
+                _routesRing.sprite = null;
             if (_routesButton != null)
                 Destroy(_routesButton);
             if (_routesAnchor != null)
@@ -255,17 +426,35 @@ namespace RouteViz
             _routesAnchor = null;
             _routesInactiveAnchor = null;
             _backAnchor = null;
+            _backInactiveAnchor = null;
             _routesButtonRect = null;
+            _routesCollider = null;
+            _routesCanvas = null;
+            _routesSymbol = null;
+            _routesRing = null;
             _routesGlyphGroup = null;
-            _routesShadowGroup = null;
-            if (!includeIcon)
+            _routesRingGroup = null;
+            if (!includeSprites)
                 return;
-            if (_routesIconSprite != null)
-                Destroy(_routesIconSprite);
-            if (_routesIconTexture != null)
-                Destroy(_routesIconTexture);
-            _routesIconSprite = null;
-            _routesIconTexture = null;
+            DestroyOwnedSprite(ref _routesIconSprite, ref _routesIconTexture);
+            DestroyOwnedSprite(ref _routesRingSprite, ref _routesRingTexture);
+        }
+
+        /// <summary>Hot-reload must free these; on quit Unity already tears them down and Destroy throws.</summary>
+        private void DestroyOwnedSprite(ref Sprite sprite, ref Texture2D tex)
+        {
+            if (_quitting)
+            {
+                sprite = null;
+                tex = null;
+                return;
+            }
+            if (sprite != null)
+                Destroy(sprite);
+            if (tex != null)
+                Destroy(tex);
+            sprite = null;
+            tex = null;
         }
 
         private static FieldInfo FindField(Type type, string name)
@@ -279,82 +468,128 @@ namespace RouteViz
             return null;
         }
 
-        // ---------------------------------------------------------------- icon
+        // ---------------------------------------------------------------- sprites
 
         private Sprite GetRoutesIcon()
         {
-            if (_routesIconSprite != null)
-                return _routesIconSprite;
-
-            const int ss = 4; // 4x4 supersampling
-            var pixels = new Color32[IconSize * IconSize];
-            for (int py = 0; py < IconSize; py++)
-            {
-                for (int px = 0; px < IconSize; px++)
-                {
-                    int hits = 0;
-                    for (int sy = 0; sy < ss; sy++)
-                        for (int sx = 0; sx < ss; sx++)
-                        {
-                            float x = px + (sx + 0.5f) / ss;
-                            float y = IconSize - (py + (sy + 0.5f) / ss); // design space has y pointing down
-                            if (IconCovers(x, y))
-                                hits++;
-                        }
-                    byte a = (byte)(hits * 255 / (ss * ss));
-                    pixels[py * IconSize + px] = new Color32(255, 255, 255, a);
-                }
-            }
-
-            var tex = new Texture2D(IconSize, IconSize, TextureFormat.RGBA32, false)
-            {
-                name = "RouteViz_RoutesIcon",
-                filterMode = FilterMode.Bilinear,
-                wrapMode = TextureWrapMode.Clamp,
-            };
-            tex.SetPixels32(pixels);
-            tex.Apply();
-            _routesIconTexture = tex;
-            _routesIconSprite = Sprite.Create(tex, new Rect(0, 0, IconSize, IconSize), new Vector2(0.5f, 0.5f), 100f);
-            _routesIconSprite.name = "RouteViz_RoutesIcon";
+            if (_routesIconSprite == null)
+                _routesIconSprite = MakeSprite(IconTextureSize, IconDesignSize, EdgeSoftness * IconDesignSize / IconDisplaySize,
+                    IconSdf, "RouteViz_RoutesIcon", out _routesIconTexture);
             return _routesIconSprite;
         }
 
-        /// <summary>Rear view of a small car on a highway, in a 128x128 design space with y down.</summary>
-        private static bool IconCovers(float x, float y)
+        private Sprite GetRingSprite()
+        {
+            if (_routesRingSprite == null)
+                _routesRingSprite = MakeSprite(RingTextureSize, RingDiameter, EdgeSoftness, RingSdf, "RouteViz_RoutesRing", out _routesRingTexture);
+            return _routesRingSprite;
+        }
+
+        /// <summary>
+        /// White sprite whose alpha is the analytic coverage of a signed-distance shape (negative inside), sampled at
+        /// texel centres: alpha = clamp(0.5 - d / edge), with the edge ramp in design units (at least one texel).
+        /// Mipmapped and trilinear so it stays smooth when drawn smaller. Mip levels are built on the CPU —
+        /// this game's stripped Unity uploads blank textures for runtime Apply(updateMipmaps: true).
+        /// The Image colour tints it.
+        /// </summary>
+        private static Sprite MakeSprite(int size, float designSize, float edge, Func<float, float, float> sdf, string name, out Texture2D tex)
+        {
+            float texel = designSize / size;
+            edge = Math.Max(edge, texel);
+            var level0 = new Color32[size * size];
+            for (int py = 0; py < size; py++)
+            {
+                for (int px = 0; px < size; px++)
+                {
+                    float x = (px + 0.5f) * texel;
+                    float y = (size - (py + 0.5f)) * texel; // design space has y pointing down
+                    float a = 0.5f - sdf(x, y) / edge;
+                    a = Math.Max(0f, Math.Min(1f, a));
+                    level0[py * size + px] = new Color32(255, 255, 255, (byte)(a * 255f + 0.5f));
+                }
+            }
+
+            tex = new Texture2D(size, size, TextureFormat.RGBA32, true)
+            {
+                name = name,
+                filterMode = FilterMode.Trilinear,
+                anisoLevel = 4,
+                wrapMode = TextureWrapMode.Clamp,
+            };
+            tex.SetPixels32(level0, 0);
+            Color32[] prev = level0;
+            int prevSize = size;
+            for (int mip = 1; mip < tex.mipmapCount; mip++)
+            {
+                int s = Math.Max(1, prevSize / 2);
+                var next = new Color32[s * s];
+                for (int y = 0; y < s; y++)
+                {
+                    for (int x = 0; x < s; x++)
+                    {
+                        int x0 = x * 2, y0 = y * 2;
+                        int x1 = Math.Min(x0 + 1, prevSize - 1);
+                        int y1 = Math.Min(y0 + 1, prevSize - 1);
+                        // Box-filter alpha (RGB stays white); average in float so thin strokes don't disappear.
+                        int a = prev[y0 * prevSize + x0].a + prev[y0 * prevSize + x1].a
+                              + prev[y1 * prevSize + x0].a + prev[y1 * prevSize + x1].a;
+                        next[y * s + x] = new Color32(255, 255, 255, (byte)((a + 2) / 4));
+                    }
+                }
+                tex.SetPixels32(next, mip);
+                prev = next;
+                prevSize = s;
+            }
+            tex.Apply(false, false); // upload our CPU mips; do not regenerate
+            Sprite sprite = Sprite.Create(tex, new Rect(0, 0, size, size), new Vector2(0.5f, 0.5f), 100f);
+            sprite.name = name;
+            return sprite;
+        }
+
+        /// <summary>Ring in a RingDiameter design square, its outer edge just inside the border.</summary>
+        private static float RingSdf(float x, float y)
+        {
+            float half = RingDiameter / 2f;
+            float outer = half - 0.75f;
+            float dx = x - half, dy = y - half;
+            float d = (float)Math.Sqrt(dx * dx + dy * dy);
+            return Math.Abs(d - (outer - RingStroke / 2f)) - RingStroke / 2f;
+        }
+
+        /// <summary>
+        /// Rear view of a small car driving up a road, in a 128x128 design space with y down: bold road edges converging
+        /// to the horizon and two route chevrons ahead of the car, all clipped to a circle so they stop just inside the ring.
+        /// </summary>
+        private static float IconSdf(float x, float y)
         {
             float car = CarSdf(x, y);
-            if (car <= 0f)
-            {
-                // Cut-outs: rear window and two tail lights.
-                if (RoundRect(x, y, 64f, 61f, 20f, 8f, 4f) <= 0f)
-                    return false;
-                if (RoundRect(x, y, 41f, 86f, 8f, 5f, 3f) <= 0f)
-                    return false;
-                if (RoundRect(x, y, 87f, 86f, 8f, 5f, 3f) <= 0f)
-                    return false;
-                return true;
-            }
-            if (car < 6f)
-                return false; // clear gap around the car
+            // Cut-outs: rear window and two tail lights.
+            float cut = Math.Min(RoundRect(x, y, 64f, 77f, 14f, 5f, 3f),
+                Math.Min(RoundRect(x, y, 47f, 96f, 6f, 3.5f, 2f), RoundRect(x, y, 81f, 96f, 6f, 3.5f, 2f)));
+            float carShape = Math.Max(car, -cut);
 
-            // Road edges converging toward the horizon (thicker up close), and a centre-lane dash ahead of the car.
-            if (Taper(x, y, 4f, 120f, 8f, 42f, 14f, 4.5f) <= 0f)
-                return true;
-            if (Taper(x, y, 124f, 120f, 8f, 86f, 14f, 4.5f) <= 0f)
-                return true;
-            if (Taper(x, y, 64f, 34f, 5.5f, 64f, 14f, 4f) <= 0f)
-                return true;
-            return false;
+            float road = Math.Min(Taper(x, y, 10f, 112f, 8.5f, 52f, 14f, 3.5f), Taper(x, y, 118f, 112f, 8.5f, 76f, 14f, 3.5f));
+            float chevrons = Math.Min(Chevron(x, y, 64f, 43f, 12.5f, 10f, 4.4f), Chevron(x, y, 64f, 24f, 7.5f, 6.5f, 3.3f));
+            float route = Math.Max(Math.Min(road, chevrons), 6f - car); // kept 6 units clear of the car
+
+            float dx = x - 64f, dy = y - 64f;
+            float circle = (float)Math.Sqrt(dx * dx + dy * dy) - 62f;
+            return Math.Max(Math.Min(carShape, route), circle);
         }
 
         private static float CarSdf(float x, float y)
         {
-            float body = RoundRect(x, y, 64f, 88f, 38f, 18f, 10f);
-            float cabin = RoundRect(x, y, 64f, 62f, 28f, 16f, 11f);
-            float wheelL = RoundRect(x, y, 41f, 110f, 9f, 9f, 3f);
-            float wheelR = RoundRect(x, y, 87f, 110f, 9f, 9f, 3f);
+            float body = RoundRect(x, y, 64f, 97f, 28f, 13f, 7f);
+            float cabin = RoundRect(x, y, 64f, 78f, 20f, 11f, 7f);
+            float wheelL = RoundRect(x, y, 47f, 112f, 6.5f, 6f, 2f);
+            float wheelR = RoundRect(x, y, 81f, 112f, 6.5f, 6f, 2f);
             return Math.Min(Math.Min(body, cabin), Math.Min(wheelL, wheelR));
+        }
+
+        /// <summary>A "^" stroke with its tip at (cx, cy), arms w wide and h tall, half-width r.</summary>
+        private static float Chevron(float x, float y, float cx, float cy, float w, float h, float r)
+        {
+            return Math.Min(Taper(x, y, cx - w, cy + h, r, cx, cy, r), Taper(x, y, cx, cy, r, cx + w, cy + h, r));
         }
 
         /// <summary>Signed distance to a stroke from (ax, ay) to (bx, by) whose half-width goes from ra to rb.</summary>

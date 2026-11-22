@@ -1,0 +1,9 @@
+{
+  "name": "RouteViz",
+  "version_number": "{{VERSION}}",
+  "website_url": "{{WEBSITE_URL}}",
+  "description": "See where the cars are going. Click a car to show its route; click a house or destination for every car driving to or from it; click a pin for the car coming to fulfil it.",
+  "dependencies": [
+    "{{PACK_DEPENDENCY}}"
+  ]
+}

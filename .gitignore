@@ -7,6 +7,9 @@
 !/RouteViz/
 !/HotReload/
 !/StrippedApiShim/
+!/tools/
+!/PACKAGING.md
+# Release output of tools/package.ps1 stays ignored: /dist/ is not allow-listed.
 
 # Build output
 bin/

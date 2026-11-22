@@ -35,31 +35,43 @@ namespace RouteViz
         }
 
         private Target _hoverTarget;
+        private Vector2 _hoverScreenPos;
         private TargetKind _loggedHoverKind;
+        private DestinationPinView _loggedHoverPin;
         private bool _loggedOutline;
         private LineRenderer _hoverOutline;
         private readonly Dictionary<GameObject, Renderer[]> _rendererCache = new Dictionary<GameObject, Renderer[]>();
         private float _rendererCacheTime;
 
-        /// <summary>Finds the pin, or else the building, under the point. Pins win: they float above buildings.</summary>
-        private bool HitTest(Vector2 screenPos, ViewIndex viewIndex, GameCamera cam, out Target target)
+        /// <summary>
+        /// Finds the pin, or else the building, under the point. Pins win: they float above buildings. `stickyPins` is
+        /// the destination whose pin was hovered last: its pins get a wider catch area, so sliding the mouse along its
+        /// row of pins never drops through a gap between two pins onto the building.
+        /// </summary>
+        private bool HitTest(Vector2 screenPos, ViewIndex viewIndex, GameCamera cam, DestinationView stickyPins, out Target target)
         {
             target = default;
             if (Time.unscaledTime - _rendererCacheTime > 1f)
             {
                 _rendererCache.Clear(); // buildings upgrade and change their meshes; refresh now and then
+                _pinShapeCache.Clear();
                 _rendererCacheTime = Time.unscaledTime;
             }
 
-            foreach (DestinationView dv in viewIndex.DestinationViews)
+            float worldPerCar = WorldPerCar(cam, screenPos);
+            if (worldPerCar > 0f)
             {
-                if (dv == null || dv.Model == null || !dv.gameObject.activeInHierarchy)
-                    continue;
-                int pinIndex = PinAt(dv, cam, screenPos, out int visiblePins, out DestinationPinView pin);
-                if (pinIndex < 0)
-                    continue;
-                target = new Target { Kind = TargetKind.Pin, Destination = dv, Pin = pin, PinIndex = pinIndex, VisiblePins = visiblePins };
-                return true;
+                Vector3 world = cam.GetWorldFromScreen(screenPos);
+                if (stickyPins != null && stickyPins.gameObject.activeInHierarchy
+                    && PinTarget(stickyPins, world, StickyPinPadCarLengths * worldPerCar, out target))
+                    return true;
+                foreach (DestinationView dv in viewIndex.DestinationViews)
+                {
+                    if (dv == null || dv.Model == null || !dv.gameObject.activeInHierarchy)
+                        continue;
+                    if (PinTarget(dv, world, PinHitPadCarLengths * worldPerCar, out target))
+                        return true;
+                }
             }
             foreach (DestinationView dv in viewIndex.DestinationViews)
             {
@@ -88,29 +100,135 @@ namespace RouteViz
         /// <summary>Hover for pins and buildings. They take precedence over cars. Returns true if one is hovered.</summary>
         private bool UpdateBuildingHover(Vector2 screenPos)
         {
+            DestinationView sticky = StickyPins();
             _hoverTarget = default;
+            _hoverScreenPos = screenPos;
             if (!_routesVisible)
                 return false;
             if (!TryGetWorld(out ViewIndex viewIndex, out ISimulation simulation))
                 return false;
             GameCamera cam = AnyGameCamera(viewIndex, simulation);
-            if (cam != null && HitTest(screenPos, viewIndex, cam, out Target t))
+            if (cam != null && HitTest(screenPos, viewIndex, cam, sticky, out Target t))
                 _hoverTarget = t;
-            if (_verboseLogging.Value && _hoverTarget.Kind != _loggedHoverKind)
+            if (cam != null) TempPinTest(viewIndex, cam); // TEMP
+            if (_verboseLogging.Value && (_hoverTarget.Kind != _loggedHoverKind || _hoverTarget.Pin != _loggedHoverPin))
             {
                 _loggedHoverKind = _hoverTarget.Kind;
-                Logger.LogInfo($"[hover] {_hoverTarget.Kind} bounds {_hoverTarget.Bounds.center}/{_hoverTarget.Bounds.size}");
+                _loggedHoverPin = _hoverTarget.Pin;
+                Logger.LogInfo(_hoverTarget.Kind == TargetKind.Pin
+                    ? $"[hover] Pin {_hoverTarget.PinIndex + 1}/{_hoverTarget.VisiblePins}{(sticky == _hoverTarget.Destination ? " (sticky row)" : "")}"
+                    : $"[hover] {_hoverTarget.Kind} bounds {_hoverTarget.Bounds.center}/{_hoverTarget.Bounds.size}");
             }
             return _hoverTarget.Kind != TargetKind.None;
         }
+
+        // TEMP test harness.
+        private bool _tempSwept;
+        private LineRenderer _tempLine;
+        private float _tempStart;
+        private bool _tempCleaned;
+        private Material _tempMat;
+        private void TempPinTest(ViewIndex viewIndex, GameCamera cam)
+        {
+            DestinationView best = null;
+            DestinationPinAnimatorView bestA = null;
+            foreach (DestinationView dv in viewIndex.DestinationViews)
+                if (dv != null && dv.gameObject.activeInHierarchy && PinAnimatorField?.GetValue(dv) is DestinationPinAnimatorView a && a != null
+                    && (bestA == null || a.VisiblePinCount > bestA.VisiblePinCount))
+                { best = dv; bestA = a; }
+            if (best == null || bestA.VisiblePinCount < 2)
+                return;
+            var centres = new List<Vector2>();
+            int forced = -1;
+            for (int i = 0; i < bestA.pins.Count; i++)
+                if (bestA.pins[i] != null && bestA.pins[i].IsVisible)
+                {
+                    centres.Add(cam.GetScreenFromWorld(bestA.pins[i].PinCenterPosition));
+                    if (forced < 0 || centres.Count == 2) forced = i;
+                }
+            if (!_tempCleaned)
+            {
+                _tempCleaned = true;
+                int killed = 0;
+                foreach (DestinationView dv in viewIndex.DestinationViews)
+                    if (dv != null)
+                        for (int c = dv.transform.childCount - 1; c >= 0; c--)
+                        {
+                            Transform ch = dv.transform.GetChild(c);
+                            if (ch.name == "RouteViz_Line" && (_hoverOutline == null || ch != _hoverOutline.transform)) { Destroy(ch.gameObject); killed++; }
+                        }
+                Logger.LogInfo($"[pintest] removed {killed} stray lines");
+            }
+            if (_tempStart == 0f) _tempStart = Time.unscaledTime;
+            if (Time.unscaledTime - _tempStart > 25f)
+            {
+                if (_tempLine != null) _tempLine.enabled = false;
+            }
+            else if (forced >= 0 && TryGetPinShape(bestA.pins[forced], out PinShape ts))
+            {
+                float wpc = CarLengthPixels(viewIndex, cam) / (cam.GetScreenFromWorld(Vector3.right) - cam.GetScreenFromWorld(Vector3.zero)).magnitude;
+                _tempLine = EnsureLine(_tempLine, best.transform.parent != null ? best.transform.parent : best.transform);
+                _tempLine.useWorldSpace = true;
+                _tempLine.numCapVertices = 0;
+                _tempLine.startWidth = _tempLine.endWidth = OutlineCarLengths * wpc;
+                _tempLine.startColor = _tempLine.endColor = RingColor;
+                _tempLine.sortingLayerID = SortingLayer.NameToID("UI"); if (_tempMat == null) { _tempMat = new Material(_tempLine.sharedMaterial); _tempMat.renderQueue = 4000; } _tempLine.sharedMaterial = _tempMat;
+                _tempLine.sortingOrder = 32000;
+                _points.Clear();
+                PinOutline(ts, PadCarLengths * wpc, LineZ);
+                var arr = _points.ToArray();
+                { float cx = bestA.pins[forced].PinCenterPosition.x; for (int k = 0; k < arr.Length; k++) arr[k].x = 2f * cx - arr[k].x; }
+                _points.Clear();
+                _tempLine.positionCount = arr.Length;
+                _tempLine.SetPositions(arr);
+                _tempLine.enabled = true;
+                if (Time.frameCount % 120 == 0)
+                    Logger.LogInfo($"[pintest] temp line mirrored at pin {forced} scr {cam.GetScreenFromWorld(bestA.pins[forced].PinCenterPosition)} parent {_tempLine.transform.parent.name}");
+            }
+            if (_tempSwept)
+                return;
+            _tempSwept = true;
+            Logger.LogInfo("[pintest] layers: " + string.Join(", ", System.Array.ConvertAll(SortingLayer.layers, l => SortingLayer.IDToName(l.id) + "=" + SortingLayer.GetLayerValueFromID(l.id))));
+            float carPx = CarLengthPixels(viewIndex, cam);
+            foreach (float off in new[] { 0f, -0.5f, 0.5f, -0.8f, 0.8f })
+            {
+                var plain = new System.Text.StringBuilder();
+                var sticky = new System.Text.StringBuilder();
+                DestinationView prev = null;
+                for (int seg = 0; seg + 1 < centres.Count; seg++)
+                {
+                    Vector2 a = centres[seg], b = centres[seg + 1];
+                    Vector2 n = new Vector2(-(b - a).y, (b - a).x).normalized * off * carPx;
+                    for (int k = 0; k < 20; k++)
+                    {
+                        Vector2 sp = Vector2.Lerp(a, b, k / 20f) + n;
+                        HitTest(sp, viewIndex, cam, null, out Target t0);
+                        plain.Append(TempChar(t0));
+                        HitTest(sp, viewIndex, cam, prev, out Target t1);
+                        sticky.Append(TempChar(t1));
+                        prev = t1.Kind == TargetKind.Pin ? t1.Destination : null;
+                    }
+                }
+                Logger.LogInfo($"[pintest] offset {off} car: plain  {plain}\n[pintest] offset {off} car: sticky {sticky}");
+            }
+        }
+        private static char TempChar(Target t) =>
+            t.Kind == TargetKind.Pin ? (char)('1' + t.PinIndex) : t.Kind == TargetKind.Destination ? 'D' : t.Kind == TargetKind.House ? 'H' : '-';
 
         /// <summary>Handles a click on a pin or building (checked before cars). Returns true if it hit one.</summary>
         private bool ClickPinOrBuilding(Vector2 screenPos)
         {
             if (!TryGetWorld(out ViewIndex viewIndex, out ISimulation simulation))
                 return false;
-            GameCamera cam = AnyGameCamera(viewIndex, simulation);
-            if (cam == null || !HitTest(screenPos, viewIndex, cam, out Target t))
+            // Act on exactly what's outlined: hover ran this frame for the same mouse position.
+            Target t = _hoverTarget;
+            if (!(_routesVisible && screenPos == _hoverScreenPos))
+            {
+                GameCamera cam = AnyGameCamera(viewIndex, simulation);
+                if (cam == null || !HitTest(screenPos, viewIndex, cam, StickyPins(), out t))
+                    return false;
+            }
+            if (t.Kind == TargetKind.Pin && (t.Pin == null || !t.Pin.IsVisible))
                 return false;
 
             switch (t.Kind)
@@ -149,7 +267,7 @@ namespace RouteViz
             return false;
         }
 
-        /// <summary>Outlines the hovered pin (a ring) or building (a rounded rectangle), like the car ring.</summary>
+        /// <summary>Outlines the hovered pin (pin-shaped) or building (a rounded rectangle), like the car ring.</summary>
         private void DrawBuildingOutline()
         {
             Target t = _hoverTarget;
@@ -193,12 +311,13 @@ namespace RouteViz
             const float z = LineZ; // in front of buildings and pins (z -1..0); the layer does the rest
             if (t.Kind == TargetKind.Pin)
             {
-                float r = _clickRadius.Value * PinRadiusFraction * worldPerCar;
-                if (_pointBuffer.Length < RingPointCount)
-                    _pointBuffer = new Vector3[Mathf.NextPowerOfTwo(RingPointCount)];
-                int n = FillRing(_pointBuffer, centre.x, centre.y, r, z);
-                for (int i = 0; i < n; i++)
-                    _points.Add(_pointBuffer[i]);
+                // Rebuilt every frame from the pin sprite's current transform, so it follows the pop-in animation.
+                if (!TryGetPinShape(t.Pin, out PinShape shape))
+                {
+                    line.enabled = false;
+                    return;
+                }
+                PinOutline(shape, PadCarLengths * worldPerCar, z);
             }
             else
             {
@@ -212,6 +331,8 @@ namespace RouteViz
             line.positionCount = _points.Count;
             line.SetPositions(_pointBuffer);
             line.enabled = true;
+            if (Time.frameCount % 120 == 0) // TEMP
+                Logger.LogInfo($"[pintest] draw {t.Kind} pin {t.PinIndex} first {_points[0]:F3} n {_points.Count} active {line.gameObject.activeInHierarchy} en {line.enabled} order {line.sortingOrder} layer {SortingLayer.IDToName(line.sortingLayerID)} mat {(line.sharedMaterial != null ? line.sharedMaterial.shader.name : "null")}");
             if (_verboseLogging.Value && !_loggedOutline)
             {
                 _loggedOutline = true;
@@ -325,8 +446,6 @@ namespace RouteViz
             return any;
         }
 
-        private const float PinRadiusFraction = 0.7f; // pin circles are a bit smaller than car circles
-
         /// <summary>On-screen length of a car, in pixels (from any car in view), or 0 if there are none.</summary>
         private static float CarLengthPixels(ViewIndex viewIndex, GameCamera cam)
         {
@@ -405,31 +524,191 @@ namespace RouteViz
             PlayClick(anyShown ? Sounds.Kind.Dong : Sounds.Kind.Ding);
         }
 
-        /// <summary>Index of the visible pin under the point (in the animator's pin list), or -1.</summary>
-        private int PinAt(DestinationView dv, GameCamera cam, Vector2 screenPos, out int visiblePins, out DestinationPinView hit)
+        // Pin geometry, measured in game (sprite SPR_Pin_Small_BakedCol, 256 px at 128 px/unit, so -1..1 in sprite
+        // units, drawn at world scale 0.5): a teardrop, a round head with a sharp point straight down, white rim
+        // included. In units of the sprite's half-height, relative to the sprite's centre:
+        private const float PinHeadY = 0.18f;   // head circle centre (also the coloured dot's centre)
+        private const float PinHeadRadius = 0.80f;
+        private const float PinTipY = -0.99f;   // the point
+
+        private const float PinHitPadCarLengths = 0.25f;   // pins catch the mouse a little outside their outline
+        private const float StickyPinPadCarLengths = 0.6f; // ...and further out while one of the same row is hovered
+
+        /// <summary>A pin's teardrop, in the local space of its sprite renderer.</summary>
+        private struct PinShape
         {
-            visiblePins = 0;
-            hit = null;
+            public Transform Transform;
+            public Vector2 Head;
+            public float Radius;
+            public Vector2 Tip;
+            public float Scale; // world units per local unit
+            public int SortingOrder;
+        }
+
+        private readonly Dictionary<DestinationPinView, SpriteRenderer> _pinShapeCache = new Dictionary<DestinationPinView, SpriteRenderer>();
+
+        /// <summary>The pin's body sprite (the white-rimmed teardrop), or else its biggest visible sprite.</summary>
+        private bool TryGetPinShape(DestinationPinView pin, out PinShape shape)
+        {
+            shape = default;
+            if (pin == null)
+                return false;
+            if (!_pinShapeCache.TryGetValue(pin, out SpriteRenderer body) || body == null)
+            {
+                body = null;
+                float bestSize = 0f;
+                foreach (SpriteRenderer sr in pin.GetComponentsInChildren<SpriteRenderer>(true))
+                {
+                    if (sr.sprite == null)
+                        continue;
+                    if (sr.sprite.name.Contains("BakedCol")) { body = sr; break; }
+                    float size = sr.sprite.bounds.size.y * sr.transform.lossyScale.y;
+                    if (sr.color.a > 0.01f && size > bestSize) { bestSize = size; body = sr; }
+                }
+                if (body == null)
+                    return false;
+                _pinShapeCache[pin] = body;
+            }
+            if (body.sprite == null || !body.gameObject.activeInHierarchy)
+                return false;
+            Bounds sb = body.sprite.bounds;
+            float h = sb.extents.y;
+            Transform tr = body.transform;
+            float scale = Mathf.Abs(tr.lossyScale.y);
+            if (h < 1e-5f || scale < 1e-5f)
+                return false;
+            shape = new PinShape
+            {
+                Transform = tr,
+                Head = new Vector2(sb.center.x, sb.center.y + PinHeadY * h),
+                Radius = PinHeadRadius * h,
+                Tip = new Vector2(sb.center.x, sb.center.y + PinTipY * h),
+                Scale = scale,
+                SortingOrder = body.sortingOrder,
+            };
+            return true;
+        }
+
+        /// <summary>
+        /// Distance in world units from the point to the pin's teardrop (negative inside, roughly). The teardrop is
+        /// the convex hull of the head circle and the tip.
+        /// </summary>
+        private static float PinDistance(PinShape s, Vector3 world)
+        {
+            Vector3 l = s.Transform.InverseTransformPoint(world);
+            var p = new Vector2(s.Head.x + Mathf.Abs(l.x - s.Head.x), l.y); // symmetric: fold onto the right half
+            float dHead = (p - s.Head).magnitude - s.Radius;
+            TipTangent(s.Head, s.Radius, s.Tip, out Vector2 tangent, out _);
+            // Right flank, from the tip up to where it touches the head.
+            Vector2 e = tangent - s.Tip;
+            float u = Mathf.Clamp01(Vector2.Dot(p - s.Tip, e) / e.sqrMagnitude);
+            float dFlank = (p - (s.Tip + u * e)).magnitude;
+            // On the axis side of the flank, between the tip and the head: inside the pin.
+            float cross = e.x * (p.y - s.Tip.y) - e.y * (p.x - s.Tip.x);
+            if (cross > 0f && p.y >= s.Tip.y && p.y <= tangent.y)
+                dFlank = -dFlank;
+            return Mathf.Min(dHead, dFlank) * s.Scale;
+        }
+
+        /// <summary>Where the right flank from the tip touches the head circle, and the sine of the tip's half-angle.</summary>
+        private static void TipTangent(Vector2 head, float radius, Vector2 tip, out Vector2 tangent, out float sinHalfAngle)
+        {
+            float d = Mathf.Max((head - tip).magnitude, radius * 1.001f);
+            sinHalfAngle = radius / d;
+            float cosA = radius / d; // angle at the head between "towards the tip" and the tangent point
+            float sinA = Mathf.Sqrt(Mathf.Max(0f, 1f - cosA * cosA));
+            Vector2 down = (tip - head) / d;
+            var right = new Vector2(-down.y, down.x); // "down" turned a quarter anticlockwise: +x for a pin pointing down
+            tangent = head + radius * (cosA * down + sinA * right);
+        }
+
+        /// <summary>
+        /// The pin's teardrop grown by `pad` world units (a bigger head and a lower point, flanks parallel), as a closed
+        /// line for a capless LineRenderer: it starts and ends mid-way along the right flank so the ends meet flush.
+        /// </summary>
+        private void PinOutline(PinShape s, float pad, float z)
+        {
+            float padLocal = pad / s.Scale;
+            TipTangent(s.Head, s.Radius, s.Tip, out _, out float sinHalf);
+            Vector2 down = (s.Tip - s.Head).normalized;
+            float radius = s.Radius + padLocal;
+            Vector2 tip = s.Tip + down * (padLocal / Mathf.Max(sinHalf, 0.1f));
+            TipTangent(s.Head, radius, tip, out Vector2 tangentRight, out _);
+            Vector2 tangentLeft = new Vector2(2f * s.Head.x - tangentRight.x, tangentRight.y);
+
+            Vector2 seam = (tip + tangentRight) * 0.5f;
+            AddPinPoint(s, seam, z);
+            // Head arc, anticlockwise from the right tangent point over the top to the left one.
+            float a0 = Mathf.Atan2(tangentRight.y - s.Head.y, tangentRight.x - s.Head.x);
+            float a1 = Mathf.Atan2(tangentLeft.y - s.Head.y, tangentLeft.x - s.Head.x);
+            if (a1 < a0)
+                a1 += 2f * (float)System.Math.PI;
+            const int arcSegments = 32;
+            for (int i = 0; i <= arcSegments; i++)
+            {
+                float a = a0 + (a1 - a0) * i / arcSegments;
+                AddPinPoint(s, s.Head + radius * new Vector2(Mathf.Cos(a), Mathf.Sin(a)), z);
+            }
+            AddPinPoint(s, tip, z);
+            AddPinPoint(s, seam, z);
+        }
+
+        private void AddPinPoint(PinShape s, Vector2 local, float z)
+        {
+            Vector3 w = s.Transform.TransformPoint(new Vector3(local.x, local.y, 0f));
+            _points.Add(new Vector3(w.x, w.y, z));
+        }
+
+        /// <summary>The destination whose pin is hovered now, if any (its pins are sticky; see HitTest).</summary>
+        private DestinationView StickyPins()
+        {
+            return _hoverTarget.Kind == TargetKind.Pin && _hoverTarget.Destination != null ? _hoverTarget.Destination : null;
+        }
+
+        /// <summary>
+        /// The destination's visible pin under the world point, allowing `pad` world units around each pin's outline.
+        /// Where pins overlap, the one drawn on top wins if the point is really on it; otherwise the nearest.
+        /// </summary>
+        private bool PinTarget(DestinationView dv, Vector3 world, float pad, out Target target)
+        {
+            target = default;
             if (!(PinAnimatorField?.GetValue(dv) is DestinationPinAnimatorView animator) || animator == null || animator.pins == null)
-                return -1;
-            visiblePins = animator.VisiblePinCount;
+                return false;
             int best = -1;
-            float carPx = CarLengthPixels(null, cam);
-            float bestDistance = carPx * _clickRadius.Value * PinRadiusFraction;
+            float bestDistance = pad;
+            int bestOrder = int.MinValue;
             for (int i = 0; i < animator.pins.Count; i++)
             {
                 DestinationPinView pin = animator.pins[i];
-                if (pin == null || !pin.IsVisible || !pin.gameObject.activeInHierarchy)
+                if (pin == null || !pin.IsVisible || !pin.gameObject.activeInHierarchy || !TryGetPinShape(pin, out PinShape shape))
                     continue;
-                float d = (cam.GetScreenFromWorld(pin.PinCenterPosition) - screenPos).magnitude;
-                if (d < bestDistance)
+                float d = PinDistance(shape, world);
+                if (d > pad)
+                    continue;
+                bool better = d <= 0f && bestDistance <= 0f ? shape.SortingOrder > bestOrder : d < bestDistance;
+                if (best < 0 || better)
                 {
-                    bestDistance = d;
                     best = i;
-                    hit = pin;
+                    bestDistance = d;
+                    bestOrder = shape.SortingOrder;
                 }
             }
-            return best;
+            if (best < 0)
+                return false;
+            target = new Target
+            {
+                Kind = TargetKind.Pin, Destination = dv, Pin = animator.pins[best], PinIndex = best, VisiblePins = animator.VisiblePinCount,
+            };
+            return true;
+        }
+
+        /// <summary>World units per car length at the screen point (car lengths are measured on screen), or 0.</summary>
+        private static float WorldPerCar(GameCamera cam, Vector2 screenPos)
+        {
+            float carPx = CarLengthPixels(null, cam);
+            Vector3 w = cam.GetWorldFromScreen(screenPos);
+            float ppu = (cam.GetScreenFromWorld(w + Vector3.right) - cam.GetScreenFromWorld(w)).magnitude;
+            return carPx > 0f && ppu > 1e-3f ? carPx / ppu : 0f;
         }
 
         /// <summary>Whether the point falls inside the screen rectangle around the world bounds.</summary>
