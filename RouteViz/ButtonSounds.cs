@@ -5,8 +5,9 @@ using UnityEngine.UI;
 namespace RouteViz
 {
     /// <summary>
-    /// Our buttons are clones of the game's back button; give them the game's ordinary button sound
-    /// (UIAudioProfile.Generic: a hover note, and "sineFX_35" + "ui_lineOpens" on click) instead of the back sound.
+    /// Our buttons are clones of the game's back button. Instantiate only copies serialized fields, so runtime
+    /// state from VariableDeviceSelectable.Initialize (menuNavigation, audio system, …) is missing and
+    /// TouchButton.OnPointerExit NREs on menuNavigation.ClearFocus. Copy what we need from the source.
     /// </summary>
     public partial class RouteVizPlugin
     {
@@ -14,7 +15,7 @@ namespace RouteViz
         /// Sets the clone's audio profile to Generic, the default of every game button (Pause/Play/FastForward have
         /// their own profiles, which also change the game speed's music). TouchButton then schedules the UI Click event
         /// itself in OnPointerUp/OnSubmit (right after our click listener runs), and MouseOver on hover.
-        /// The clone's audio system reference isn't serialized, so copy it from the source button (or the global one).
+        /// Also copies menuNavigation / feedback / device type from the source so hover/exit don't NRE.
         /// </summary>
         private void ApplyGameButtonSound(TouchButton button, TouchButton source = null)
         {
@@ -22,12 +23,35 @@ namespace RouteViz
             if (profile != null)
                 profile.SetValue(button, UIAudioProfile.Generic);
 
-            FieldInfo system = FindField(typeof(TouchButton), "_audioSystem");
-            if (system != null && system.GetValue(button) == null)
+            CopyField(button, source, "_audioSystem", AudioSystem.Instance);
+            CopyField(button, source, "menuNavigation");
+            CopyField(button, source, "_feedbackGenerator");
+
+            // DeviceInputType is a private-set property on VariableDeviceSelectable; without it, exit still
+            // reaches ClearFocus but with a default type — copy the live value from the back button.
+            if (source != null)
             {
-                object value = source != null ? system.GetValue(source) : null;
-                system.SetValue(button, value ?? AudioSystem.Instance);
+                PropertyInfo device = null;
+                for (var t = button.GetType(); t != null && device == null; t = t.BaseType)
+                    device = t.GetProperty("DeviceInputType", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                if (device != null && device.CanWrite)
+                    device.SetValue(button, device.GetValue(source));
+                else if (device != null)
+                {
+                    FieldInfo backing = FindField(button.GetType(), "<DeviceInputType>k__BackingField");
+                    if (backing != null)
+                        backing.SetValue(button, device.GetValue(source));
+                }
             }
+        }
+
+        private static void CopyField(TouchButton button, TouchButton source, string name, object fallback = null)
+        {
+            FieldInfo field = FindField(button.GetType(), name);
+            if (field == null)
+                return;
+            object value = source != null ? field.GetValue(source) : null;
+            field.SetValue(button, value ?? fallback);
         }
     }
 }

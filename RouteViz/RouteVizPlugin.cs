@@ -68,8 +68,9 @@ namespace RouteViz
         /// <summary>False while the overlay is toggled off; selections are kept and reappear when toggled back on.</summary>
         private bool _routesVisible = true;
 
-        /// <summary>True after quit starts; skip Destroy on runtime textures (Unity releases them and complains if we do).</summary>
+        /// <summary>True after quit starts; skip Destroy — this build strips Application.isQuitting, so we watch Application.quitting.</summary>
         private bool _quitting;
+        private Delegate _quittingHandler;
 
         /// <summary>One selected car and the lines showing its route.</summary>
         private sealed class Selection
@@ -207,6 +208,7 @@ namespace RouteViz
             }
 
             RestoreStateAfterReload();
+            WatchForQuit();
 
             if (TilemapViewField == null || GameCameraField == null || TrailField == null)
                 Logger.LogError("Could not find VehicleView private fields; the game may have updated.");
@@ -214,14 +216,69 @@ namespace RouteViz
             Logger.LogInfo($"{Name} {Version} loaded.");
         }
 
-        private void OnApplicationQuit()
+        /// <summary>
+        /// Application.isQuitting is stripped; the quitting event is not. It fires before teardown, so we can
+        /// skip Destroy and avoid "releasing ... targetTexture" on the UI Camera.
+        /// </summary>
+        private void WatchForQuit()
+        {
+            try
+            {
+                EventInfo ev = typeof(Application).GetEvent("quitting", BindingFlags.Static | BindingFlags.Public);
+                if (ev == null)
+                    return;
+                _quittingHandler = Delegate.CreateDelegate(ev.EventHandlerType, this, nameof(HandleQuitting));
+                ev.AddEventHandler(null, _quittingHandler);
+            }
+            catch (Exception e)
+            {
+                Logger.LogWarning($"Couldn't watch Application.quitting: {e.Message}");
+            }
+        }
+
+        private void HandleQuitting()
         {
             _quitting = true;
+            try
+            {
+                if (_routesButton != null)
+                    _routesButton.SetActive(false);
+                if (_clearButton != null)
+                    _clearButton.SetActive(false);
+            }
+            catch { /* UI may already be gone */ }
+        }
+
+        private void OnApplicationQuit()
+        {
+            HandleQuitting();
         }
 
         /// <summary>Removes every line this plugin made, so unloading or hot-reloading leaves nothing behind.</summary>
         private void OnDestroy()
         {
+            if (_quittingHandler != null)
+            {
+                try
+                {
+                    EventInfo ev = typeof(Application).GetEvent("quitting", BindingFlags.Static | BindingFlags.Public);
+                    ev?.RemoveEventHandler(null, _quittingHandler);
+                }
+                catch { /* ignore */ }
+                _quittingHandler = null;
+            }
+
+            try { _sounds?.Dispose(); }
+            catch { /* ignore */ }
+
+            // UI clones: never Destroy here (quit races the UI Camera). Hot reload uses DestroyLeftover on recreate.
+            AbandonClearButton();
+            AbandonRoutesButton();
+
+            // Quitting: do not Destroy anything Unity-owned (UI Camera targetTexture errors). Hot reload only.
+            if (_quitting)
+                return;
+
             try
             {
                 SaveStateForReload();
@@ -230,25 +287,29 @@ namespace RouteViz
             {
                 Logger.LogWarning($"Couldn't save state for the next reload: {e.Message}");
             }
-            _sounds?.Dispose();
-            // Clear first so it drops the shared ring sprite before Routes destroys that texture.
-            DestroyClearButton();
-            DestroyRoutesButton();
-            DestroyOverlays();
-            foreach (Selection s in _selections)
-                foreach (RouteMesh mesh in s.Lines)
-                    mesh?.Destroy();
-            _selections.Clear();
-            while (_spareMeshes.Count > 0)
-                _spareMeshes.Pop().Destroy();
-            while (_spareLines.Count > 0)
+
+            try
             {
-                LineRenderer line = _spareLines.Pop();
-                if (line != null)
-                    Destroy(line.gameObject);
+                DestroyOverlays();
+                foreach (Selection s in _selections)
+                    foreach (RouteMesh mesh in s.Lines)
+                        mesh?.Destroy();
+                _selections.Clear();
+                while (_spareMeshes.Count > 0)
+                    _spareMeshes.Pop().Destroy();
+                while (_spareLines.Count > 0)
+                {
+                    LineRenderer line = _spareLines.Pop();
+                    if (line != null)
+                        Destroy(line.gameObject);
+                }
+                if (_material != null)
+                    Destroy(_material);
             }
-            if (_material != null)
-                Destroy(_material);
+            catch (Exception e)
+            {
+                Logger.LogWarning($"Unload cleanup hit a Unity teardown race: {e.Message}");
+            }
             Logger.LogInfo($"{Name} {Version} unloaded.");
         }
 

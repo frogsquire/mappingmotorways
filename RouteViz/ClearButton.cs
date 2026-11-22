@@ -69,11 +69,11 @@ namespace RouteViz
 
             if (_clearButton != null)
             {
+                SyncAnchorPair(_clearBackAnchor, _clearBackInactiveAnchor, _clearAnchor, _clearInactiveAnchor, 2f * RoutesButtonSpacing);
                 if (_clearBackAnchor != null && _clearAnchor != null && _clearAnchor.activeSelf != _clearBackAnchor.activeSelf)
                     _clearAnchor.SetActive(_clearBackAnchor.activeSelf);
                 if (_clearBackButton != null && _clearButton.activeSelf != _clearBackButton.gameObject.activeSelf)
                     _clearButton.SetActive(_clearBackButton.gameObject.activeSelf);
-                SyncAnchorPair(_clearBackAnchor, _clearBackInactiveAnchor, _clearAnchor, _clearInactiveAnchor, 2f * RoutesButtonSpacing);
                 AnimateClearButton();
                 return;
             }
@@ -195,21 +195,8 @@ namespace RouteViz
                         _clearCollider.sizeDelta = new Vector2(ColliderSize, ColliderSize);
                         child.gameObject.SetActive(true);
                         break;
-                    case "BG_Circle":
-                        {
-                            var bg = child.GetComponent<Image>();
-                            if (bg != null)
-                            {
-                                Color bgc = bg.color;
-                                bgc.a = 1f;
-                                bg.color = bgc;
-                                bg.enabled = true;
-                            }
-                            child.localScale = Vector3.one;
-                            child.gameObject.SetActive(true);
-                        }
-                        break;
                     default:
+                        // Transparent outlined icon: hide the back button's filled cream disc and chrome.
                         child.gameObject.SetActive(false);
                         break;
                 }
@@ -232,6 +219,10 @@ namespace RouteViz
             }
             _clearScale = 1f;
             _clearPressed = false;
+
+            // Drop in with FloatingElement like the routes button / back button.
+            if (_clearAnchor != null)
+                _clearAnchor.SetActive(false);
 
             if (_verboseLogging.Value)
                 Logger.LogInfo($"Clear button created at {rect.anchoredPosition}.");
@@ -270,13 +261,34 @@ namespace RouteViz
             }
         }
 
-        /// <summary>OnDestroy: remove the button and its anchors, and (when unloading) its icon too.</summary>
+        /// <summary>Drop references without Destroy — see AbandonRoutesButton.</summary>
+        private void AbandonClearButton()
+        {
+            if (_clearSymbol != null)
+                _clearSymbol.sprite = null;
+            if (_clearRing != null)
+                _clearRing.sprite = null;
+            _clearButton = null;
+            _clearAnchor = null;
+            _clearInactiveAnchor = null;
+            _clearBackAnchor = null;
+            _clearBackInactiveAnchor = null;
+            _clearButtonRect = null;
+            _clearCollider = null;
+            _clearCanvas = null;
+            _clearSymbol = null;
+            _clearRing = null;
+            _clearIconSprite = null;
+            _clearIconTexture = null;
+        }
+
+        /// <summary>Create failure path: destroy the half-built button GOs (game is running; safe to Destroy).</summary>
         private void DestroyClearButton(bool includeSprites = true)
         {
             if (_clearSymbol != null)
                 _clearSymbol.sprite = null;
             if (_clearRing != null)
-                _clearRing.sprite = null; // shared ring; Routes owns the texture
+                _clearRing.sprite = null;
             if (_clearButton != null)
                 Destroy(_clearButton);
             if (_clearAnchor != null)
@@ -295,7 +307,12 @@ namespace RouteViz
             _clearRing = null;
             if (!includeSprites)
                 return;
-            DestroyOwnedSprite(ref _clearIconSprite, ref _clearIconTexture);
+            if (_clearIconSprite != null)
+                Destroy(_clearIconSprite);
+            if (_clearIconTexture != null)
+                Destroy(_clearIconTexture);
+            _clearIconSprite = null;
+            _clearIconTexture = null;
         }
 
         // ---------------------------------------------------------------- broom icon

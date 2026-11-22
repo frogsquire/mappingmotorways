@@ -106,13 +106,14 @@ namespace RouteViz
 
             if (_routesButton != null)
             {
+                // Positions first, then activeSelf — so the drop-in starts from the right place.
+                SyncAnchorPair(_backAnchor, _backInactiveAnchor, _routesAnchor, _routesInactiveAnchor, RoutesButtonSpacing);
                 // Shown/hidden together with the back button: the game hides it by switching off its anchor
-                // (FloatingElement then floats it away) or the button itself.
+                // (FloatingElement then floats it in/out) or the button itself.
                 if (_backAnchor != null && _routesAnchor != null && _routesAnchor.activeSelf != _backAnchor.activeSelf)
                     _routesAnchor.SetActive(_backAnchor.activeSelf);
                 if (_routesBackButton != null && _routesButton.activeSelf != _routesBackButton.gameObject.activeSelf)
                     _routesButton.SetActive(_routesBackButton.gameObject.activeSelf);
-                SyncAnchorPair(_backAnchor, _backInactiveAnchor, _routesAnchor, _routesInactiveAnchor, RoutesButtonSpacing);
                 AnimateRoutesButton();
                 return;
             }
@@ -129,8 +130,7 @@ namespace RouteViz
                 screen = Object.FindObjectOfType<GameUIScreen>();
             if (screen == null || screen.backButton == null)
                 return;
-            // Cold start: the back button is still floating in / laying out; cloning then snapshots a bad
-            // position (F6 works because the UI has settled). Wait until it's at rest.
+            // Need the back button's FloatingElement anchors; SyncAnchorPair tracks later layout moves.
             if (!BackButtonReady(screen.backButton))
                 return;
 
@@ -253,24 +253,9 @@ namespace RouteViz
                         _routesCollider.sizeDelta = new Vector2(ColliderSize, ColliderSize);
                         child.gameObject.SetActive(true);
                         break;
-                    case "BG_Circle":
-                        // Keep the cream disc for contrast. Reset colour/scale: Instantiate copies the live
-                        // back button, which may still be mid fade-in on a cold start.
-                        {
-                            var bg = child.GetComponent<Image>();
-                            if (bg != null)
-                            {
-                                Color bgc = bg.color;
-                                bgc.a = 1f;
-                                bg.color = bgc;
-                                bg.enabled = true;
-                            }
-                            child.localScale = Vector3.one;
-                            child.gameObject.SetActive(true);
-                        }
-                        break;
                     default:
-                        // Gold hover circle, white highlight glyph, light background circles, arrow shadow.
+                        // Gold hover circle, cream BG disc, white highlight glyph, arrow shadow — we want a
+                        // transparent outlined icon, not the back button's filled chrome.
                         child.gameObject.SetActive(false);
                         break;
                 }
@@ -294,6 +279,11 @@ namespace RouteViz
             }
             _routesScale = 1f;
             _routesPressed = false;
+
+            // Start with the active anchor off so FloatingElement plays its drop-in when Update syncs it
+            // to the back button's anchor (same appear animation the game's own buttons use).
+            if (_routesAnchor != null)
+                _routesAnchor.SetActive(false);
 
             if (_verboseLogging.Value)
                 Logger.LogInfo($"Routes button created at {rect.anchoredPosition} next to the back button.");
@@ -323,13 +313,10 @@ namespace RouteViz
             inactiveField.SetValue(floating, _routesInactiveAnchor.transform);
         }
 
-        /// <summary>
-        /// True once the back button's float-in has finished and its active anchor is on. Cloning earlier
-        /// copies a mid-animation pose and freezes our anchors at a pre-layout position.
-        /// </summary>
+        /// <summary>True once the back button has a FloatingElement with anchors we can clone and track.</summary>
         private static bool BackButtonReady(TouchButton back)
         {
-            if (back == null || !back.isActiveAndEnabled || !back.gameObject.activeInHierarchy)
+            if (back == null || !back.isActiveAndEnabled)
                 return false;
             Component fe = null;
             foreach (Component c in back.GetComponents<Component>())
@@ -343,10 +330,8 @@ namespace RouteViz
             if (fe == null)
                 return true;
             var baseEl = FindField(fe.GetType(), "baseElement")?.GetValue(fe) as GameObject;
-            if (baseEl == null || !baseEl.activeInHierarchy)
-                return false;
-            var animating = fe.GetType().GetProperty("IsAnimating")?.GetValue(fe) as bool?;
-            return animating != true;
+            var inactive = FindField(fe.GetType(), "_inactiveAnchor")?.GetValue(fe) as Transform;
+            return baseEl != null && inactive != null;
         }
 
         /// <summary>Keep our float anchors locked to the back button's, so late layout moves don't leave us stranded.</summary>
@@ -409,7 +394,35 @@ namespace RouteViz
             }
         }
 
-        /// <summary>OnDestroy: remove the button and its anchors, and (when unloading) the sprites too.</summary>
+        /// <summary>
+        /// Drop references without Destroy. Safe during quit (avoids UI Camera targetTexture errors) and
+        /// during hot reload (next CreateRoutesButton DestroyLeftover removes any leftover GOs by name).
+        /// </summary>
+        private void AbandonRoutesButton()
+        {
+            if (_routesSymbol != null)
+                _routesSymbol.sprite = null;
+            if (_routesRing != null)
+                _routesRing.sprite = null;
+            _routesButton = null;
+            _routesAnchor = null;
+            _routesInactiveAnchor = null;
+            _backAnchor = null;
+            _backInactiveAnchor = null;
+            _routesButtonRect = null;
+            _routesCollider = null;
+            _routesCanvas = null;
+            _routesSymbol = null;
+            _routesRing = null;
+            _routesGlyphGroup = null;
+            _routesRingGroup = null;
+            _routesIconSprite = null;
+            _routesIconTexture = null;
+            _routesRingSprite = null;
+            _routesRingTexture = null;
+        }
+
+        /// <summary>Create failure path: destroy the half-built button GOs (game is running; safe to Destroy).</summary>
         private void DestroyRoutesButton(bool includeSprites = true)
         {
             if (_routesSymbol != null)
@@ -436,25 +449,18 @@ namespace RouteViz
             _routesRingGroup = null;
             if (!includeSprites)
                 return;
-            DestroyOwnedSprite(ref _routesIconSprite, ref _routesIconTexture);
-            DestroyOwnedSprite(ref _routesRingSprite, ref _routesRingTexture);
-        }
-
-        /// <summary>Hot-reload must free these; on quit Unity already tears them down and Destroy throws.</summary>
-        private void DestroyOwnedSprite(ref Sprite sprite, ref Texture2D tex)
-        {
-            if (_quitting)
-            {
-                sprite = null;
-                tex = null;
-                return;
-            }
-            if (sprite != null)
-                Destroy(sprite);
-            if (tex != null)
-                Destroy(tex);
-            sprite = null;
-            tex = null;
+            if (_routesIconSprite != null)
+                Destroy(_routesIconSprite);
+            if (_routesIconTexture != null)
+                Destroy(_routesIconTexture);
+            if (_routesRingSprite != null)
+                Destroy(_routesRingSprite);
+            if (_routesRingTexture != null)
+                Destroy(_routesRingTexture);
+            _routesIconSprite = null;
+            _routesIconTexture = null;
+            _routesRingSprite = null;
+            _routesRingTexture = null;
         }
 
         private static FieldInfo FindField(Type type, string name)
