@@ -2,6 +2,7 @@ using System.Collections.Generic;
 using System.Reflection;
 using Motorways;
 using Motorways.Models;
+using Motorways.Processes;
 using Motorways.Views;
 using Server;
 using UnityEngine;
@@ -34,6 +35,8 @@ namespace RouteViz
         }
 
         private Target _hoverTarget;
+        private TargetKind _loggedHoverKind;
+        private bool _loggedOutline;
         private LineRenderer _hoverOutline;
         private readonly Dictionary<GameObject, Renderer[]> _rendererCache = new Dictionary<GameObject, Renderer[]>();
         private float _rendererCacheTime;
@@ -82,20 +85,26 @@ namespace RouteViz
             return false;
         }
 
-        /// <summary>Hover for pins and buildings, only when no car is under the mouse.</summary>
-        private void UpdateBuildingHover(Vector2 screenPos)
+        /// <summary>Hover for pins and buildings. They take precedence over cars. Returns true if one is hovered.</summary>
+        private bool UpdateBuildingHover(Vector2 screenPos)
         {
             _hoverTarget = default;
-            if (!_routesVisible || _hover != null)
-                return;
+            if (!_routesVisible)
+                return false;
             if (!TryGetWorld(out ViewIndex viewIndex, out ISimulation simulation))
-                return;
+                return false;
             GameCamera cam = AnyGameCamera(viewIndex, simulation);
             if (cam != null && HitTest(screenPos, viewIndex, cam, out Target t))
                 _hoverTarget = t;
+            if (_verboseLogging.Value && _hoverTarget.Kind != _loggedHoverKind)
+            {
+                _loggedHoverKind = _hoverTarget.Kind;
+                Logger.LogInfo($"[hover] {_hoverTarget.Kind} bounds {_hoverTarget.Bounds.center}/{_hoverTarget.Bounds.size}");
+            }
+            return _hoverTarget.Kind != TargetKind.None;
         }
 
-        /// <summary>Handles a click that didn't hit a car. Returns true if it hit a pin or building.</summary>
+        /// <summary>Handles a click on a pin or building (checked before cars). Returns true if it hit one.</summary>
         private bool ClickPinOrBuilding(Vector2 screenPos)
         {
             if (!TryGetWorld(out ViewIndex viewIndex, out ISimulation simulation))
@@ -144,36 +153,35 @@ namespace RouteViz
         private void DrawBuildingOutline()
         {
             Target t = _hoverTarget;
-            bool valid = t.Kind == TargetKind.Pin ? t.Pin != null && t.Pin.IsVisible
-                : t.Kind == TargetKind.Destination ? t.Destination != null
-                : t.Kind == TargetKind.House && t.House != null;
+            Component owner = t.Kind == TargetKind.Pin ? (t.Pin != null && t.Pin.IsVisible ? t.Destination : null)
+                : t.Kind == TargetKind.Destination ? t.Destination
+                : t.Kind == TargetKind.House ? (Component)t.House : null;
             GameCamera cam = null;
-            Transform parent = null;
-            if (valid && TryGetWorld(out ViewIndex viewIndex, out ISimulation simulation))
+            float carPx = 0f;
+            // Car views are root objects (no shared parent), so the line hangs off the hovered building instead; it's
+            // in world space, so the parent only keeps it alive (the game destroys foreign root objects).
+            if (owner != null && TryGetWorld(out ViewIndex viewIndex, out ISimulation simulation))
             {
                 cam = AnyGameCamera(viewIndex, simulation);
-                parent = AnyCarParent(viewIndex, simulation);
+                if (cam != null)
+                    carPx = CarLengthPixels(viewIndex, cam);
             }
-            if (!valid || cam == null || parent == null)
+            Vector3 centre = t.Kind == TargetKind.Pin && owner != null ? t.Pin.PinCenterPosition : t.Bounds.center;
+            float ppu = cam != null ? (cam.GetScreenFromWorld(centre + Vector3.right) - cam.GetScreenFromWorld(centre)).magnitude : 0f;
+            if (owner == null || ppu < 1e-3f || carPx <= 0f)
             {
                 if (_hoverOutline != null)
                     _hoverOutline.enabled = false;
                 return;
             }
 
-            Vector3 centre = t.Kind == TargetKind.Pin ? t.Pin.PinCenterPosition : t.Bounds.center;
-            float ppu = (cam.GetScreenFromWorld(centre + Vector3.right) - cam.GetScreenFromWorld(centre)).magnitude;
-            if (ppu < 1e-3f)
-                return;
-
-            if (_hoverOutline == null)
-            {
-                _hoverOutline = EnsureLine(null, parent); // never returned to the pool: it's in world space
-                _hoverOutline.useWorldSpace = true;
-            }
+            _hoverOutline = EnsureLine(_hoverOutline, owner.transform); // never returned to the pool: it's in world space
             LineRenderer line = _hoverOutline;
-            line.numCapVertices = 3;
-            float width = 4.5f / ppu;
+            line.useWorldSpace = true;
+            line.numCapVertices = 0; // closed shape: round caps would overlap at the seam and draw darker
+            // Sizes in car lengths, converted to world units here, so they scale with the map like the car ring.
+            float worldPerCar = carPx / ppu;
+            float width = OutlineCarLengths * worldPerCar;
             line.startWidth = width;
             line.endWidth = width;
             line.startColor = RingColor;
@@ -182,20 +190,20 @@ namespace RouteViz
             line.sortingOrder = 100;
 
             _points.Clear();
-            float z = t.Kind == TargetKind.Pin ? centre.z - 0.05f : t.Bounds.min.z - 0.05f;
+            const float z = LineZ; // in front of buildings and pins (z -1..0); the layer does the rest
             if (t.Kind == TargetKind.Pin)
             {
-                float r = _clickRadiusPixels.Value * 0.8f / ppu;
-                for (int i = 0; i <= RingSegments; i++)
-                {
-                    float a = i * (2f * (float)System.Math.PI / RingSegments);
-                    _points.Add(new Vector3(centre.x + Mathf.Cos(a) * r, centre.y + Mathf.Sin(a) * r, z));
-                }
+                float r = _clickRadius.Value * PinRadiusFraction * worldPerCar;
+                if (_pointBuffer.Length < RingPointCount)
+                    _pointBuffer = new Vector3[Mathf.NextPowerOfTwo(RingPointCount)];
+                int n = FillRing(_pointBuffer, centre.x, centre.y, r, z);
+                for (int i = 0; i < n; i++)
+                    _points.Add(_pointBuffer[i]);
             }
             else
             {
-                float pad = 3f / ppu;
-                RoundedRect(t.Bounds.min.x - pad, t.Bounds.min.y - pad, t.Bounds.max.x + pad, t.Bounds.max.y + pad, 8f / ppu, z);
+                float pad = PadCarLengths * worldPerCar;
+                RoundedRect(t.Bounds.min.x - pad, t.Bounds.min.y - pad, t.Bounds.max.x + pad, t.Bounds.max.y + pad, 0.25f * worldPerCar, z);
             }
 
             if (_pointBuffer.Length < _points.Count)
@@ -204,13 +212,48 @@ namespace RouteViz
             line.positionCount = _points.Count;
             line.SetPositions(_pointBuffer);
             line.enabled = true;
+            if (_verboseLogging.Value && !_loggedOutline)
+            {
+                _loggedOutline = true;
+                Logger.LogInfo($"[outline] {t.Kind}: {_points.Count} pts from {_points[0]}, width {width}, layer {SortingLayer.IDToName(line.sortingLayerID)}, " +
+                               $"parent {owner.name}, ppu {ppu}, carPx {carPx}");
+            }
             _points.Clear();
         }
+
+        /// <summary>Points FillRing writes.</summary>
+        private const int RingPointCount = RingSegments + 3;
+
+        /// <summary>
+        /// A closed circle for a capless LineRenderer (this build has no LineRenderer.loop): the first and last
+        /// segments are tiny and nearly tangent at the seam, so their flat ends meet flush with no overlap or gap.
+        /// Returns the number of points written (RingPointCount).
+        /// </summary>
+        private static int FillRing(Vector3[] buffer, float cx, float cy, float r, float z)
+        {
+            const float seamGap = 0.01f; // radians
+            float step = 2f * (float)System.Math.PI / RingSegments;
+            int n = 0;
+            buffer[n++] = new Vector3(cx + r, cy, z);
+            buffer[n++] = new Vector3(cx + Mathf.Cos(seamGap) * r, cy + Mathf.Sin(seamGap) * r, z);
+            for (int i = 1; i < RingSegments; i++)
+                buffer[n++] = new Vector3(cx + Mathf.Cos(i * step) * r, cy + Mathf.Sin(i * step) * r, z);
+            buffer[n++] = new Vector3(cx + Mathf.Cos(-seamGap) * r, cy + Mathf.Sin(-seamGap) * r, z);
+            buffer[n++] = new Vector3(cx + r, cy, z);
+            return n;
+        }
+
+        private const float OutlineCarLengths = 0.22f; // outline thickness, a little bolder than the car ring
+        private const float PadCarLengths = 0.12f; // gap between building and outline
 
         private void RoundedRect(float x0, float y0, float x1, float y1, float radius, float z)
         {
             radius = Mathf.Min(radius, Mathf.Min((x1 - x0) * 0.5f, (y1 - y0) * 0.5f));
             const int perCorner = 6;
+            // Start and end mid-way up the right edge: both ends then run straight up it, so their flat (capless) ends
+            // meet flush, with no overlap to draw darker.
+            var seam = new Vector3(x1, (y0 + y1) * 0.5f, z);
+            _points.Add(seam);
             float[] cx = { x1 - radius, x0 + radius, x0 + radius, x1 - radius };
             float[] cy = { y1 - radius, y1 - radius, y0 + radius, y0 + radius };
             for (int c = 0; c < 4; c++)
@@ -219,35 +262,57 @@ namespace RouteViz
                     float a = (c * 90f + i * (90f / perCorner)) * ((float)System.Math.PI / 180f);
                     _points.Add(new Vector3(cx[c] + Mathf.Cos(a) * radius, cy[c] + Mathf.Sin(a) * radius, z));
                 }
-            _points.Add(_points[_points.Count - 4 * (perCorner + 1)]); // close the loop
+            _points.Add(seam);
         }
 
         private static int _topSortingLayer = int.MinValue;
 
-        /// <summary>The frontmost sorting layer, so outlines draw over buildings and their pins.</summary>
+        /// <summary>
+        /// The game's "InteractionCircle" layer: above buildings, demand pins and cars, below alerts and UI. Falls back
+        /// to the frontmost layer.
+        /// </summary>
         private static int TopSortingLayer()
         {
             if (_topSortingLayer == int.MinValue)
             {
+                int id = SortingLayer.NameToID("InteractionCircle");
                 SortingLayer[] layers = SortingLayer.layers;
-                _topSortingLayer = layers != null && layers.Length > 0 ? layers[layers.Length - 1].id : MotorwayCarLayerId;
+                _topSortingLayer = SortingLayer.IDToName(id) == "InteractionCircle" ? id
+                    : layers != null && layers.Length > 0 ? layers[layers.Length - 1].id : MotorwayCarLayerId;
             }
             return _topSortingLayer;
         }
 
-        /// <summary>World bounds of the object's visible renderers, leaving out anything under `exclude` (its pins).</summary>
+        /// <summary>Drop shadows: on a "...Shadow" sorting layer (HouseShadow, SquareDestinationShadow...).</summary>
+        private static bool IsShadow(Renderer r)
+        {
+            return SortingLayer.IDToName(r.sortingLayerID).EndsWith("Shadow", System.StringComparison.OrdinalIgnoreCase);
+        }
+
+        /// <summary>
+        /// World bounds of the building's body, leaving out drop shadows and anything under `exclude` (its pins).
+        /// Houses are drawn by a shared combined mesh, so their own body renderers sit inactive (only the shadow is
+        /// live); when no active body renderer is found, the inactive ones still give the right footprint.
+        /// </summary>
         private bool BuildingBounds(GameObject root, Transform exclude, out Bounds bounds)
         {
-            bounds = default;
             if (!_rendererCache.TryGetValue(root, out Renderer[] renderers))
             {
-                renderers = root.GetComponentsInChildren<Renderer>(false);
+                renderers = root.GetComponentsInChildren<Renderer>(true);
                 _rendererCache[root] = renderers;
             }
+            return BodyBounds(renderers, exclude, true, out bounds) || BodyBounds(renderers, exclude, false, out bounds);
+        }
+
+        private static bool BodyBounds(Renderer[] renderers, Transform exclude, bool activeOnly, out Bounds bounds)
+        {
+            bounds = default;
             bool any = false;
             foreach (Renderer r in renderers)
             {
-                if (r == null || !r.enabled || !r.gameObject.activeInHierarchy || r is LineRenderer)
+                if (r == null || r is LineRenderer || IsShadow(r))
+                    continue;
+                if (activeOnly && (!r.enabled || !r.gameObject.activeInHierarchy))
                     continue;
                 if (exclude != null && r.transform.IsChildOf(exclude))
                     continue;
@@ -260,15 +325,22 @@ namespace RouteViz
             return any;
         }
 
-        private static Transform AnyCarParent(ViewIndex viewIndex, ISimulation simulation)
+        private const float PinRadiusFraction = 0.7f; // pin circles are a bit smaller than car circles
+
+        /// <summary>On-screen length of a car, in pixels (from any car in view), or 0 if there are none.</summary>
+        private static float CarLengthPixels(ViewIndex viewIndex, GameCamera cam)
         {
+            if (viewIndex == null && !TryGetWorld(out viewIndex, out _))
+                return 0f;
+            if (!TryGetWorld(out _, out ISimulation simulation))
+                return 0f;
             foreach (VehicleModel m in simulation.GetModels<VehicleModel>())
             {
                 VehicleView v = viewIndex.GetVehicleView(m);
-                if (v != null && v.transform.parent != null)
-                    return v.transform.parent;
+                if (v != null && v.gameObject.activeInHierarchy && TryGetPixelsPerUnit(v, out float ppu))
+                    return ppu * (float)VehicleMovementProcess.VehicleLength;
             }
-            return null;
+            return 0f;
         }
 
         /// <summary>Cars heading to the destination (including parking there). Clears the list first.</summary>
@@ -342,7 +414,8 @@ namespace RouteViz
                 return -1;
             visiblePins = animator.VisiblePinCount;
             int best = -1;
-            float bestDistance = _clickRadiusPixels.Value * 0.8f;
+            float carPx = CarLengthPixels(null, cam);
+            float bestDistance = carPx * _clickRadius.Value * PinRadiusFraction;
             for (int i = 0; i < animator.pins.Count; i++)
             {
                 DestinationPinView pin = animator.pins[i];

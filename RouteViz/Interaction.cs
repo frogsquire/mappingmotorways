@@ -11,7 +11,7 @@ namespace RouteViz
     {
         private const int OverlaySortingOrder = 7; // above the car body (6)
         private const int RingSegments = 40;
-        private const float FlashSeconds = 0.4f;
+        private const float FlashSeconds = 0.55f;
         private const float FlashPeak = 0.85f;
         private static readonly Color RingColor = new Color(0f, 0f, 0f, 0.55f);
 
@@ -29,10 +29,18 @@ namespace RouteViz
         private Sounds _sounds;
 
         /// <summary>The car whose click circle contains the screen point (the nearest one if circles overlap).</summary>
+        /// <summary>Click-circle radius in the car parent's local units (sized to the car, not the screen).</summary>
+        private float RingRadius => (float)VehicleMovementProcess.VehicleLength * _clickRadius.Value;
+
+        /// <summary>Outline thickness in local units, as a fraction of a car length. Matches the
+        /// game's bold outlines (about 4.5 px at normal zoom) and scales with zoom like the radius.</summary>
+        private static float OutlineWidth => (float)VehicleMovementProcess.VehicleLength * 0.17f;
+
         private VehicleView FindCarAt(Vector2 screenPos, out float distance, out int viewCount)
         {
             VehicleView best = null;
-            distance = _clickRadiusPixels.Value;
+            distance = float.MaxValue;
+            float bestRatio = 1f; // distance / that car's circle radius, on screen
             viewCount = 0;
             foreach (VehicleView view in EnumerateVehicleViews())
             {
@@ -41,9 +49,13 @@ namespace RouteViz
                     continue;
                 if (!(GameCameraField?.GetValue(view) is GameCamera cam))
                     continue;
+                if (!TryGetPixelsPerUnit(view, out float ppu))
+                    continue;
                 float d = (cam.GetScreenFromWorld(view.transform.position) - screenPos).magnitude;
-                if (d < distance)
+                float ratio = d / (RingRadius * ppu);
+                if (ratio < bestRatio)
                 {
+                    bestRatio = ratio;
                     distance = d;
                     best = view;
                 }
@@ -53,24 +65,25 @@ namespace RouteViz
 
         private void UpdateHover()
         {
-            _hover = _routesVisible ? FindCarAt(Input.mousePosition, out _, out _) : null;
-            UpdateBuildingHover(Input.mousePosition);
+            // Pins and buildings take precedence over cars; only one thing is outlined at a time.
+            bool building = UpdateBuildingHover(Input.mousePosition);
+            _hover = _routesVisible && !building ? FindCarAt(Input.mousePosition, out _, out _) : null;
         }
 
         private void ToggleAt(Vector2 screenPos)
         {
+            // Pin > building > car, as for hover.
+            if (ClickPinOrBuilding(screenPos))
+                return;
+
             VehicleView best = FindCarAt(screenPos, out float distance, out int viewCount);
             if (_verboseLogging.Value)
                 Logger.LogInfo($"Click at {screenPos}: {viewCount} vehicles, " +
                                (best == null ? "none in range." : $"hit vehicle {best.Model.id} ({distance:F1}px)."));
 
-            // Not a car: maybe a pin or a building. Clicking empty space does nothing, so routes aren't cleared by accident.
-            if (best == null)
-            {
-                ClickPinOrBuilding(screenPos);
-                return;
-            }
-            ToggleCar(best);
+            // Clicking empty space does nothing, so routes aren't cleared by accident.
+            if (best != null)
+                ToggleCar(best);
         }
 
         private int FindSelection(VehicleView view)
@@ -128,9 +141,9 @@ namespace RouteViz
             {
                 Transform parent = hover.transform.parent;
                 _hoverRing = EnsureLine(_hoverRing, parent);
-                _hoverRing.numCapVertices = 3;
-                float radius = _clickRadiusPixels.Value / ppu;
-                float width = 4.5f / ppu; // bold, like the game's own outlines
+                _hoverRing.numCapVertices = 0; // closed ring: round caps would overlap at the seam and draw darker
+                float radius = RingRadius;
+                float width = OutlineWidth; // bold, like the game's own outlines
                 _hoverRing.startWidth = width;
                 _hoverRing.endWidth = width;
                 _hoverRing.startColor = RingColor;
@@ -138,14 +151,9 @@ namespace RouteViz
                 _hoverRing.sortingLayerID = CarSortingLayer(hover);
                 _hoverRing.sortingOrder = OverlaySortingOrder;
                 Vector3 c = hover.transform.localPosition;
-                if (_pointBuffer.Length < RingSegments + 1)
-                    _pointBuffer = new Vector3[Mathf.NextPowerOfTwo(RingSegments + 1)];
-                for (int i = 0; i <= RingSegments; i++)
-                {
-                    float a = i * (2f * (float)System.Math.PI / RingSegments);
-                    _pointBuffer[i] = new Vector3(c.x + Mathf.Cos(a) * radius, c.y + Mathf.Sin(a) * radius, LineZ);
-                }
-                _hoverRing.positionCount = RingSegments + 1;
+                if (_pointBuffer.Length < RingPointCount)
+                    _pointBuffer = new Vector3[Mathf.NextPowerOfTwo(RingPointCount)];
+                _hoverRing.positionCount = FillRing(_pointBuffer, c.x, c.y, radius, LineZ);
                 _hoverRing.SetPositions(_pointBuffer);
                 _hoverRing.enabled = true;
             }

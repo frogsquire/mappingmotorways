@@ -25,7 +25,7 @@ namespace RouteViz
     {
         public const string Guid = "motorways.routeviz";
         public const string Name = "RouteViz";
-        public const string Version = "0.9.3";
+        public const string Version = "1.0.0";
 
         private const float LineZ = -6.05f; // cars sit at z = -6.1
         // Same sorting layer a car on that lane uses ("Car" on the ground, "MotorwayCar" on bridges), just below the
@@ -54,7 +54,7 @@ namespace RouteViz
         private ConfigEntry<float> _pulseSecondsPerColor;
         private ConfigEntry<float> _widthInCarLengths;
         private ConfigEntry<float> _arrowSpeed;
-        private ConfigEntry<float> _clickRadiusPixels;
+        private ConfigEntry<float> _clickRadius;
         private ConfigEntry<float> _dragTolerancePixels;
         private ConfigEntry<string> _toggleKeyName;
         private ConfigEntry<bool> _verboseLogging;
@@ -172,7 +172,7 @@ namespace RouteViz
                 "Route width as a fraction of one car length (0.46 = about as wide as a car).");
             _arrowSpeed = Config.Bind("Display", "ArrowSpeed", 1.2f,
                 "How fast the arrows on a route move, in car lengths per second (real time). 0 = still.");
-            _clickRadiusPixels = Config.Bind("Input", "ClickRadiusPixels", 22f,
+            _clickRadius = Config.Bind("Input", "ClickRadius", 0.8f,
                 "How close (in screen pixels) a click must be to a car to select it.");
             _dragTolerancePixels = Config.Bind("Input", "DragTolerancePixels", 6f,
                 "Mouse movement allowed between press and release for it to count as a click.");
@@ -223,6 +223,7 @@ namespace RouteViz
                 Logger.LogWarning($"Couldn't save state for the next reload: {e.Message}");
             }
             _sounds?.Dispose();
+            DestroyRoutesButton();
             DestroyOverlays();
             foreach (Selection s in _selections)
                 foreach (RouteMesh mesh in s.Lines)
@@ -260,6 +261,15 @@ namespace RouteViz
             {
                 _loggedFirstUpdate = true;
                 Logger.LogInfo("Update loop running.");
+            }
+
+            try
+            {
+                UpdateRoutesButton();
+            }
+            catch (Exception e)
+            {
+                if (!_routesButtonFailed) { _routesButtonFailed = true; Logger.LogError($"Routes button failed: {e}"); }
             }
 
             try
@@ -352,12 +362,16 @@ namespace RouteViz
                 }
                 else
                 {
-                    _routesVisible = !_routesVisible;
-                    PlayClick(_routesVisible ? Sounds.Kind.Ding : Sounds.Kind.Error);
-                    Logger.LogInfo(_routesVisible
-                        ? $"Routes shown ({_selections.Count})."
-                        : $"Routes hidden ({_selections.Count} kept; press Alt+{_toggleKey} to show).");
+                    ToggleRoutesVisible();
                 }
+            }
+
+            // Over game UI (e.g. the routes button): not a map click, and no hover rings.
+            if (PointerOverUI())
+            {
+                _mouseDownTracked = false;
+                _hover = null;
+                return;
             }
 
             // While hidden (Alt+C), clicks don't select: you couldn't see what you'd toggled.
