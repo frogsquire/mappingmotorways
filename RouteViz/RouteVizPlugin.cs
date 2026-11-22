@@ -25,7 +25,7 @@ namespace RouteViz
     {
         public const string Guid = "motorways.routeviz";
         public const string Name = "RouteViz";
-        public const string Version = "0.9.4";
+        public const string Version = "1.0.0";
 
         private const float LineZ = -6.05f; // cars sit at z = -6.1
         // Same sorting layer a car on that lane uses ("Car" on the ground, "MotorwayCar" on bridges), just below the
@@ -223,6 +223,7 @@ namespace RouteViz
                 Logger.LogWarning($"Couldn't save state for the next reload: {e.Message}");
             }
             _sounds?.Dispose();
+            DestroyRoutesButton();
             DestroyOverlays();
             foreach (Selection s in _selections)
                 foreach (RouteMesh mesh in s.Lines)
@@ -264,11 +265,11 @@ namespace RouteViz
 
             try
             {
-                ProbeBackButton();
+                UpdateRoutesButton();
             }
             catch (Exception e)
             {
-                if (!_buttonProbed) { _buttonProbed = true; Logger.LogWarning($"[probe] failed: {e}"); }
+                if (!_routesButtonFailed) { _routesButtonFailed = true; Logger.LogError($"Routes button failed: {e}"); }
             }
 
             try
@@ -361,12 +362,16 @@ namespace RouteViz
                 }
                 else
                 {
-                    _routesVisible = !_routesVisible;
-                    PlayClick(_routesVisible ? Sounds.Kind.Ding : Sounds.Kind.Error);
-                    Logger.LogInfo(_routesVisible
-                        ? $"Routes shown ({_selections.Count})."
-                        : $"Routes hidden ({_selections.Count} kept; press Alt+{_toggleKey} to show).");
+                    ToggleRoutesVisible();
                 }
+            }
+
+            // Over game UI (e.g. the routes button): not a map click, and no hover rings.
+            if (PointerOverUI())
+            {
+                _mouseDownTracked = false;
+                _hover = null;
+                return;
             }
 
             // While hidden (Alt+C), clicks don't select: you couldn't see what you'd toggled.
