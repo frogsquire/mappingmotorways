@@ -11,8 +11,8 @@ namespace RouteViz
     {
         private const int OverlaySortingOrder = 7; // above the car body (6)
         private const int RingSegments = 40;
-        private const float FlashSeconds = 0.4f;
-        private const float FlashPeak = 0.85f;
+        private const float FlashSeconds = 0.75f;
+        private const float FlashPeak = 1f;
         private static readonly Color RingColor = new Color(0f, 0f, 0f, 0.55f);
 
         private sealed class Flash
@@ -29,10 +29,17 @@ namespace RouteViz
         private Sounds _sounds;
 
         /// <summary>The car whose click circle contains the screen point (the nearest one if circles overlap).</summary>
+        /// <summary>Click-circle radius in the car parent's local units (sized to the car, not the screen).</summary>
+        private float RingRadius => (float)VehicleMovementProcess.VehicleLength * _clickRadius.Value;
+
+        /// <summary>Outline thickness in local units, as a fraction of a car length.</summary>
+        private static float OutlineWidth => (float)VehicleMovementProcess.VehicleLength * 0.08f;
+
         private VehicleView FindCarAt(Vector2 screenPos, out float distance, out int viewCount)
         {
             VehicleView best = null;
-            distance = _clickRadiusPixels.Value;
+            distance = float.MaxValue;
+            float bestRatio = 1f; // distance / that car's circle radius, on screen
             viewCount = 0;
             foreach (VehicleView view in EnumerateVehicleViews())
             {
@@ -41,9 +48,13 @@ namespace RouteViz
                     continue;
                 if (!(GameCameraField?.GetValue(view) is GameCamera cam))
                     continue;
+                if (!TryGetPixelsPerUnit(view, out float ppu))
+                    continue;
                 float d = (cam.GetScreenFromWorld(view.transform.position) - screenPos).magnitude;
-                if (d < distance)
+                float ratio = d / (RingRadius * ppu);
+                if (ratio < bestRatio)
                 {
+                    bestRatio = ratio;
                     distance = d;
                     best = view;
                 }
@@ -129,8 +140,8 @@ namespace RouteViz
                 Transform parent = hover.transform.parent;
                 _hoverRing = EnsureLine(_hoverRing, parent);
                 _hoverRing.numCapVertices = 3;
-                float radius = _clickRadiusPixels.Value / ppu;
-                float width = 4.5f / ppu; // bold, like the game's own outlines
+                float radius = RingRadius;
+                float width = OutlineWidth; // bold, like the game's own outlines
                 _hoverRing.startWidth = width;
                 _hoverRing.endWidth = width;
                 _hoverRing.startColor = RingColor;
@@ -168,9 +179,11 @@ namespace RouteViz
                     continue;
                 }
 
-                float alpha = t < 0.06f ? t / 0.06f : 1f - (t - 0.06f) / (FlashSeconds - 0.06f);
+                // Pop in, hold, then fade: easy to spot even with several cars moving.
+                const float popIn = 0.05f, hold = 0.2f;
+                float alpha = t < popIn ? t / popIn : t < popIn + hold ? 1f : 1f - (t - popIn - hold) / (FlashSeconds - popIn - hold);
                 alpha = Mathf.Clamp01(alpha) * FlashPeak;
-                float diameter = (float)VehicleMovementProcess.VehicleLength * (1.1f + 0.4f * Mathf.Clamp01(t / FlashSeconds));
+                float diameter = (float)VehicleMovementProcess.VehicleLength * (1.3f + 0.5f * Mathf.Clamp01(t / FlashSeconds));
                 Vector3 c = f.View.transform.localPosition;
 
                 f.Disc = EnsureLine(f.Disc, f.View.transform.parent);

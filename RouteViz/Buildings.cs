@@ -2,6 +2,7 @@ using System.Collections.Generic;
 using System.Reflection;
 using Motorways;
 using Motorways.Models;
+using Motorways.Processes;
 using Motorways.Views;
 using Server;
 using UnityEngine;
@@ -34,6 +35,8 @@ namespace RouteViz
         }
 
         private Target _hoverTarget;
+        private TargetKind _loggedHoverKind;
+        private bool _loggedOutline;
         private LineRenderer _hoverOutline;
         private readonly Dictionary<GameObject, Renderer[]> _rendererCache = new Dictionary<GameObject, Renderer[]>();
         private float _rendererCacheTime;
@@ -93,6 +96,11 @@ namespace RouteViz
             GameCamera cam = AnyGameCamera(viewIndex, simulation);
             if (cam != null && HitTest(screenPos, viewIndex, cam, out Target t))
                 _hoverTarget = t;
+            if (_verboseLogging.Value && _hoverTarget.Kind != _loggedHoverKind)
+            {
+                _loggedHoverKind = _hoverTarget.Kind;
+                Logger.LogInfo($"[hover] {_hoverTarget.Kind} bounds {_hoverTarget.Bounds.center}/{_hoverTarget.Bounds.size}");
+            }
         }
 
         /// <summary>Handles a click that didn't hit a car. Returns true if it hit a pin or building.</summary>
@@ -173,7 +181,12 @@ namespace RouteViz
             }
             LineRenderer line = _hoverOutline;
             line.numCapVertices = 3;
-            float width = 4.5f / ppu;
+            // Sizes in car lengths, converted to world units here, so they scale with the map like the car ring.
+            float carPx = CarLengthPixels(viewIndex2(), cam);
+            if (carPx <= 0f)
+                return;
+            float worldPerCar = carPx / ppu;
+            float width = 0.08f * worldPerCar;
             line.startWidth = width;
             line.endWidth = width;
             line.startColor = RingColor;
@@ -185,7 +198,7 @@ namespace RouteViz
             float z = t.Kind == TargetKind.Pin ? centre.z - 0.05f : t.Bounds.min.z - 0.05f;
             if (t.Kind == TargetKind.Pin)
             {
-                float r = _clickRadiusPixels.Value * 0.8f / ppu;
+                float r = _clickRadius.Value * PinRadiusFraction * worldPerCar;
                 for (int i = 0; i <= RingSegments; i++)
                 {
                     float a = i * (2f * (float)System.Math.PI / RingSegments);
@@ -194,8 +207,8 @@ namespace RouteViz
             }
             else
             {
-                float pad = 3f / ppu;
-                RoundedRect(t.Bounds.min.x - pad, t.Bounds.min.y - pad, t.Bounds.max.x + pad, t.Bounds.max.y + pad, 8f / ppu, z);
+                float pad = 0.06f * worldPerCar;
+                RoundedRect(t.Bounds.min.x - pad, t.Bounds.min.y - pad, t.Bounds.max.x + pad, t.Bounds.max.y + pad, 0.25f * worldPerCar, z);
             }
 
             if (_pointBuffer.Length < _points.Count)
@@ -204,6 +217,12 @@ namespace RouteViz
             line.positionCount = _points.Count;
             line.SetPositions(_pointBuffer);
             line.enabled = true;
+            if (_verboseLogging.Value && !_loggedOutline)
+            {
+                _loggedOutline = true;
+                Logger.LogInfo($"[outline] {t.Kind}: {_points.Count} pts from {_points[0]}, width {width}, layer {SortingLayer.IDToName(line.sortingLayerID)}, " +
+                               $"parent {(line.transform.parent != null ? line.transform.parent.name : "-")}, ppu {ppu}");
+            }
             _points.Clear();
         }
 
@@ -258,6 +277,26 @@ namespace RouteViz
                 else bounds.Encapsulate(b);
             }
             return any;
+        }
+
+        private const float PinRadiusFraction = 0.7f; // pin circles are a bit smaller than car circles
+
+        private ViewIndex viewIndex2() => TryGetWorld(out ViewIndex vi, out _) ? vi : null;
+
+        /// <summary>On-screen length of a car, in pixels (from any car in view), or 0 if there are none.</summary>
+        private static float CarLengthPixels(ViewIndex viewIndex, GameCamera cam)
+        {
+            if (viewIndex == null && !TryGetWorld(out viewIndex, out _))
+                return 0f;
+            if (!TryGetWorld(out _, out ISimulation simulation))
+                return 0f;
+            foreach (VehicleModel m in simulation.GetModels<VehicleModel>())
+            {
+                VehicleView v = viewIndex.GetVehicleView(m);
+                if (v != null && v.gameObject.activeInHierarchy && TryGetPixelsPerUnit(v, out float ppu))
+                    return ppu * (float)VehicleMovementProcess.VehicleLength;
+            }
+            return 0f;
         }
 
         private static Transform AnyCarParent(ViewIndex viewIndex, ISimulation simulation)
@@ -342,7 +381,8 @@ namespace RouteViz
                 return -1;
             visiblePins = animator.VisiblePinCount;
             int best = -1;
-            float bestDistance = _clickRadiusPixels.Value * 0.8f;
+            float carPx = CarLengthPixels(null, cam);
+            float bestDistance = carPx * _clickRadius.Value * PinRadiusFraction;
             for (int i = 0; i < animator.pins.Count; i++)
             {
                 DestinationPinView pin = animator.pins[i];

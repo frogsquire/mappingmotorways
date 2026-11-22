@@ -25,7 +25,7 @@ namespace RouteViz
     {
         public const string Guid = "motorways.routeviz";
         public const string Name = "RouteViz";
-        public const string Version = "0.9.3";
+        public const string Version = "0.9.4";
 
         private const float LineZ = -6.05f; // cars sit at z = -6.1
         // Same sorting layer a car on that lane uses ("Car" on the ground, "MotorwayCar" on bridges), just below the
@@ -54,7 +54,7 @@ namespace RouteViz
         private ConfigEntry<float> _pulseSecondsPerColor;
         private ConfigEntry<float> _widthInCarLengths;
         private ConfigEntry<float> _arrowSpeed;
-        private ConfigEntry<float> _clickRadiusPixels;
+        private ConfigEntry<float> _clickRadius;
         private ConfigEntry<float> _dragTolerancePixels;
         private ConfigEntry<string> _toggleKeyName;
         private ConfigEntry<bool> _verboseLogging;
@@ -172,7 +172,7 @@ namespace RouteViz
                 "Route width as a fraction of one car length (0.46 = about as wide as a car).");
             _arrowSpeed = Config.Bind("Display", "ArrowSpeed", 1.2f,
                 "How fast the arrows on a route move, in car lengths per second (real time). 0 = still.");
-            _clickRadiusPixels = Config.Bind("Input", "ClickRadiusPixels", 22f,
+            _clickRadius = Config.Bind("Input", "ClickRadius", 0.8f,
                 "How close (in screen pixels) a click must be to a car to select it.");
             _dragTolerancePixels = Config.Bind("Input", "DragTolerancePixels", 6f,
                 "Mouse movement allowed between press and release for it to count as a click.");
@@ -260,6 +260,15 @@ namespace RouteViz
             {
                 _loggedFirstUpdate = true;
                 Logger.LogInfo("Update loop running.");
+            }
+
+            try
+            {
+                ProbeBackButton();
+            }
+            catch (Exception e)
+            {
+                if (!_buttonProbed) { _buttonProbed = true; Logger.LogWarning($"[probe] failed: {e}"); }
             }
 
             try
