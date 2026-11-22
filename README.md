@@ -1,33 +1,40 @@
-# Mini Motorways mods
+# Mapping Motorways
 
-BepInEx mods for Mini Motorways (Steam, Windows). The main one is **RouteViz**, which shows where cars are going.
+This is a mod (really, a collection of small mods) that adds extra mapping capabilities to Mini Motorways, so you can better plan out your city and analyze how it's working.
+
+## AI usage note
+
+This mod was written largely (primarily) by Claude Code, though a human (the listed author) reviews and directs all code changes, and this readme is human-written. There's no way I would have had time to do this without Claude's assistance, even if I might technically be capable. If that icks you out to the point of not wanting to use it, I begrudge you not.
+
+## License
+
+Do whatever you want with this code. Don't violate Mini Motorways' or Steam's license. Don't use it to cheat at the game for high scores. You'll make me sad.
 
 ## What's in this repo
 
 | Folder | What it is | Where it's installed in the game |
 |---|---|---|
-| `RouteViz/` | The mod: click cars, pins or buildings to see routes | `BepInEx\scripts\` (dev, hot-reloaded) or `BepInEx\plugins\RouteViz\` |
+| `RouteViz/` | The core mod and routing code | `BepInEx\scripts\` (dev, hot-reloaded) or `BepInEx\plugins\RouteViz\` |
 | `HotReload/` | Dev tool: loads mods from `BepInEx\scripts` and reloads them live when they're rebuilt | `BepInEx\plugins\HotReload\` |
 | `StrippedApiShim/` | BepInEx preloader patcher that adds a few Unity methods this game's build strips out, which BepInEx needs | `BepInEx\patchers\` |
 
-Everything else in the working folder (decompilers, decompiled game code, reference mods) is deliberately untracked; see `.gitignore`. The decompiled game source belongs to Dinosaur Polo Club and must not be committed or published.
+There are a lot of other things you need to develop this mod - see `.gitignore`. It's up to you to find and (de)compile these, and to install the tools you might need to do so. This repo will never contain Dinosaur Polo Club code, and you shouldn't redistribute their code without permission.
 
 ## RouteViz
 
-- **Click a car** to show its route in the car's colour: the road ahead, plus the part already driven, grayed out. Click again to hide it. A ring shows which car you're over. The car flashes, and the game's own UI sounds play (pitched up for on, down for off; a warning buzz for a parked car with no route).
-- **Click a house or destination** to show every car driving to or from it. If any are shown, the click hides them instead.
-- **Click a destination's pin** to show the car coming to fulfil it.
-- **C** clears all routes. **Alt+C** hides or shows them all (selections are kept while hidden).
-- Routes are car-width bands with a pale middle and moving arrows. Where routes share a lane, that stretch pulses through each car's colour.
+- **Click a car** to show its route with nice animations. Click again to hide it.
+- **Click a house or destination** to show every car driving to or from it. Click again to hide them.
+- **Click a destination's pin** to show the car coming to fulfil it. Click again to hide it.
+- Press **C** to clear all routes. Press **Alt+C** to hide or show the mod's UI, but without changing what you have selected.
 - Settings: `BepInEx\config\motorways.routeviz.cfg` (width, arrow speed, gray amount, click radius, keys, sounds).
 
-The mod is read-only: it never changes the simulation. It uses the game's pathfinder only to fill in the start of trips that were already under way when it loaded.
+The mod is read-only, and never changes the simulation. It uses the game's pathfinder only to fill in the start of trips that were already under way when it loaded.
 
 ## Why it's built this way
 
-This game's Unity build is stripped harder than most, which shapes the code:
+This game's Unity build is stripped harder than most, so we had to use the following workarounds:
 
-- **No Unity audio clips.** `AudioClip.Create` and `AudioSource.PlayOneShot` are gone, so sounds go through the game's own G-Audio player (`AudioPlayer.UI.PlaySample`). Pass `isImportant: true` or they're dropped. There's a synthesised fallback via Windows `PlaySound`.
+- **No Unity audio clips.** `AudioClip.Create` and `AudioSource.PlayOneShot` are gone, so sounds go through the game's own G-Audio player (`AudioPlayer.UI.PlaySample`). There's a synthesised fallback via Windows `PlaySound`.
 - **No texture tiling on lines.** `LineRenderer.textureMode` and material texture offsets are gone, so routes are meshes built every frame.
 - **Other missing members:** `Mathf.PI`, the three-argument `Mathf.Min`, `ColorUtility`, `Object.FindObjectsOfType` (returns nothing). Compiling against the game's own `Managed` DLLs catches these at build time.
 - **Hidden objects only.** The game destroys foreign root GameObjects, so plugin hosts must be hidden (`hideFlags = HideAndDontSave`). That's why BepInEx needs `HideManagerGameObject = true`, and why HotReload is our own rather than BepInEx.Debug's ScriptEngine.
@@ -39,11 +46,11 @@ This game's Unity build is stripped harder than most, which shapes the code:
 3. In `BepInEx\config\BepInEx.cfg`, set `[Chainloader] HideManagerGameObject = true`.
 4. Build `StrippedApiShim` and `HotReload` (below), then start the game once.
 
-Don't replace the game's `UnityEngine.CoreModule.dll` with an unstripped one: it crashes.
+Don't replace the game's `UnityEngine.CoreModule.dll` with an unstripped one, as you'll get crrashes.
 
 ## Building
 
-Needs the .NET SDK (any recent version; projects target `net472`). Each project references the game's DLLs and copies its output into the game when built.
+Needs the .NET SDK (any recent version but we target `net472`). Each project references the game's DLLs and copies its output into the game when built.
 
 ```
 dotnet build -c Release StrippedApiShim   # -> BepInEx\patchers   (restart the game to apply)
