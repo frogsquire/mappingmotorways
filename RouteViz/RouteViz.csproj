@@ -1,0 +1,43 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net472</TargetFramework>
+    <AssemblyName>RouteViz</AssemblyName>
+    <RootNamespace>RouteViz</RootNamespace>
+    <LangVersion>9.0</LangVersion>
+    <PlatformTarget>AnyCPU</PlatformTarget>
+    <Nullable>disable</Nullable>
+    <GenerateAssemblyInfo>true</GenerateAssemblyInfo>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <CopyLocalLockFileAssemblies>false</CopyLocalLockFileAssemblies>
+    <!-- Mini Motorways install. Override with: dotnet build -p:GameDir="..." -->
+    <GameDir Condition="'$(GameDir)' == ''">D:\SteamLibrary\steamapps\common\Mini Motorways</GameDir>
+    <ManagedDir>$(GameDir)\Mini Motorways_Data\Managed</ManagedDir>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Reference Include="BepInEx"><HintPath>$(GameDir)\BepInEx\core\BepInEx.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="App"><HintPath>$(ManagedDir)\App.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="G-Audio"><HintPath>$(ManagedDir)\G-Audio.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="FixedMath"><HintPath>$(ManagedDir)\FixedMath.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="UnityEngine"><HintPath>$(ManagedDir)\UnityEngine.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="UnityEngine.CoreModule"><HintPath>$(ManagedDir)\UnityEngine.CoreModule.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="UnityEngine.InputLegacyModule"><HintPath>$(ManagedDir)\UnityEngine.InputLegacyModule.dll</HintPath><Private>false</Private></Reference>
+  </ItemGroup>
+
+  <!--
+    Development: deploy to BepInEx\scripts, where the HotReload plugin picks up each build in the running game.
+    Release: dotnet build -c Release -p:DeployTo=plugins  (and delete it from scripts, or it loads twice).
+  -->
+  <PropertyGroup>
+    <DeployTo Condition="'$(DeployTo)' == ''">scripts</DeployTo>
+    <DeployDir Condition="'$(DeployTo)' == 'scripts'">$(GameDir)\BepInEx\scripts</DeployDir>
+    <DeployDir Condition="'$(DeployTo)' != 'scripts'">$(GameDir)\BepInEx\plugins\RouteViz</DeployDir>
+  </PropertyGroup>
+
+  <Target Name="DeployToGame" AfterTargets="Build">
+    <MakeDir Directories="$(DeployDir)" />
+    <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(DeployDir)" />
+  </Target>
+
+</Project>

@@ -1,0 +1,15 @@
+# Allow-list: this folder also holds decompilers (dnSpy, ILSpy, Ghidra), the decompiled game source
+# (copyright Dinosaur Polo Club: never commit or publish it), a third-party mod for reference, and loose DLLs.
+# Only our own projects are tracked.
+/*
+!/.gitignore
+!/README.md
+!/RouteViz/
+!/HotReload/
+!/StrippedApiShim/
+
+# Build output
+bin/
+obj/
+*.user
+.vs/
